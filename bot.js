@@ -19,7 +19,7 @@ const PREMIUM_DAYS = parseInt(process.env.PREMIUM_DAYS || '30', 10);
 
 const REQUIRED_CHANNEL = process.env.REQUIRED_CHANNEL || '-1004304384442';
 const CHANNEL_INVITE_LINK = 'https://t.me/+0Wiqg6jiVGc4YTEy';
-const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'avazbekadmin';
+const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'vividieltsadmin';
 
 if (!BOT_TOKEN || !ADMIN_CHAT_ID || !SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
   console.error('Missing required environment variables.');
