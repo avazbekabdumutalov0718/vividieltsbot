@@ -18,12 +18,14 @@
 
 const TelegramBot = require('node-telegram-bot-api');
 const fetch = require('node-fetch');
+const http = require('http');
+const https = require('https');
 
 // ---- Required environment variables ----
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID; // your personal Telegram numeric chat id
-const SUPABASE_URL = process.env.SUPABASE_URL; // e.g. https://xxxx.supabase.co
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY; // service_role key (NOT anon key)
+const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID;
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const PREMIUM_DAYS = parseInt(process.env.PREMIUM_DAYS || '30', 10);
 
 if (!BOT_TOKEN || !ADMIN_CHAT_ID || !SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
@@ -33,12 +35,7 @@ if (!BOT_TOKEN || !ADMIN_CHAT_ID || !SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY)
 
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 
-// ---- Minimal HTTP server ----
-// Render's free "Web Service" tier requires the app to listen on a port,
-// even though this app is really just a Telegram bot. This tiny server
-// exists only to satisfy that requirement and to let Render's health
-// checks pass.
-const http = require('http');
+// ---- Minimal HTTP server (Render health checks uchun) ----
 const PORT = process.env.PORT || 3000;
 http
   .createServer((req, res) => {
@@ -49,8 +46,24 @@ http
     console.log(`HTTP server listening on port ${PORT} (for Render health checks)`);
   });
 
-// In-memory store: maps a short request id -> { email, userChatId, rawText }
-// (fine for a small single-admin bot; resets if the bot restarts)
+// ---- Keep-alive (Free Render Web Service uchun) ----
+const KEEP_ALIVE_URL = process.env.KEEP_ALIVE_URL || 
+  (process.env.RENDER_EXTERNAL_HOSTNAME 
+    ? `https://${process.env.RENDER_EXTERNAL_HOSTNAME}` 
+    : null);
+
+if (KEEP_ALIVE_URL) {
+  setInterval(() => {
+    https.get(KEEP_ALIVE_URL, (res) => {
+      console.log(`[Keep-alive] ${KEEP_ALIVE_URL} → ${res.statusCode}`);
+    }).on('error', (err) => {
+      console.log(`[Keep-alive] Error: ${err.message}`);
+    });
+  }, 4 * 60 * 1000); // har 4 daqiqada
+  console.log(`[Keep-alive] Enabled → ${KEEP_ALIVE_URL}`);
+}
+
+// In-memory store
 const pendingRequests = {};
 let requestCounter = 1;
 
@@ -70,7 +83,7 @@ bot.onText(/\/start/, (msg) => {
 // ---- Any message from a normal user (not the admin) ----
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
-  if (String(chatId) === String(ADMIN_CHAT_ID)) return; // ignore admin's own messages here
+  if (String(chatId) === String(ADMIN_CHAT_ID)) return;
   if (msg.text && msg.text.startsWith('/start')) return;
 
   const text = msg.caption || msg.text || '';
@@ -91,12 +104,9 @@ bot.on('message', async (msg) => {
     `📧 Aniqlangan email: ${email || '❗ topilmadi — foydalanuvchidan so\'rang'}\n\n` +
     `Xabar matni: ${text || '(matn yo\'q, ehtimol faqat rasm yubordi)'}`;
 
-  // forward the original message (photo/text) to admin, then send action buttons
   try {
     await bot.forwardMessage(ADMIN_CHAT_ID, chatId, msg.message_id);
-  } catch (e) {
-    // forwarding can fail in some edge cases; ignore and still send summary
-  }
+  } catch (e) {}
 
   await bot.sendMessage(ADMIN_CHAT_ID, summary, {
     reply_markup: {
@@ -171,9 +181,8 @@ bot.on('callback_query', async (query) => {
   }
 });
 
-// ---- Supabase helper: find user by email, then upsert their profile as premium ----
+// ---- Supabase helper ----
 async function grantPremium(email, days) {
-  // 1) Find the auth user id by email using the Admin Auth API
   const listRes = await fetch(
     `${SUPABASE_URL}/auth/v1/admin/users?email=${encodeURIComponent(email)}`,
     {
@@ -189,14 +198,13 @@ async function grantPremium(email, days) {
   }
 
   const listData = await listRes.json();
-  const users = listData.users || listData; // API shape can vary slightly by version
+  const users = listData.users || listData;
   const user = Array.isArray(users) ? users.find(u => u.email === email) : null;
 
   if (!user) {
     return { ok: false, message: `"${email}" bilan ro'yxatdan o'tgan foydalanuvchi topilmadi.` };
   }
 
-  // 2) Upsert into profiles
   const expiresAt = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
 
   const upsertRes = await fetch(`${SUPABASE_URL}/rest/v1/profiles`, {
