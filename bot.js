@@ -1,6 +1,6 @@
 /* ============================================================
    VIVID IELTS — Premium Approval Bot
-   + Majburiy kanalga obuna
+   + Majburiy kanal (Join Request bilan ishlaydi)
    + Narxlar va Admin tugmalari
    + Keep-alive
    ============================================================ */
@@ -17,11 +17,8 @@ const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const PREMIUM_DAYS = parseInt(process.env.PREMIUM_DAYS || '30', 10);
 
-// Kanal
 const REQUIRED_CHANNEL = process.env.REQUIRED_CHANNEL || '-1004304384442';
 const CHANNEL_INVITE_LINK = 'https://t.me/+0Wiqg6jiVGc4YTEy';
-
-// Admin username (o'zingiznikini yozing)
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'avazbekadmin';
 
 if (!BOT_TOKEN || !ADMIN_CHAT_ID || !SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
@@ -57,13 +54,20 @@ if (KEEP_ALIVE_URL) {
   console.log(`[Keep-alive] Enabled → ${KEEP_ALIVE_URL}`);
 }
 
+// ---- So'rov yuborganlarni eslab qolish ----
+const pendingJoinRequests = new Set(); // userId lar
+
 // ---- Kanal tekshirish ----
 async function isSubscribed(userId) {
+  // Agar so'rov yuborgan bo'lsa — ruxsat beramiz
+  if (pendingJoinRequests.has(userId)) {
+    return true;
+  }
+
   try {
     const member = await bot.getChatMember(REQUIRED_CHANNEL, userId);
     return ['member', 'administrator', 'creator'].includes(member.status);
   } catch (e) {
-    console.error('Kanal tekshirish xatosi:', e.message);
     return false;
   }
 }
@@ -72,7 +76,7 @@ function getSubscribeKeyboard() {
   return {
     inline_keyboard: [
       [{ text: '📢 Kanalga obuna bo\'lish', url: CHANNEL_INVITE_LINK }],
-      [{ text: '✅ Obuna bo\'ldim', callback_data: 'check_sub' }]
+      [{ text: '✅ So\'rov yubordim', callback_data: 'check_sub' }]
     ]
   };
 }
@@ -87,7 +91,14 @@ function getMainKeyboard() {
   };
 }
 
-// ---- In-memory store ----
+// ---- Join Request kelganda ----
+bot.on('chat_join_request', (msg) => {
+  const userId = msg.from.id;
+  pendingJoinRequests.add(userId);
+  console.log(`Yangi join request: ${userId} (${msg.from.first_name})`);
+});
+
+// ---- In-memory store (to'lovlar uchun) ----
 const pendingRequests = {};
 let requestCounter = 1;
 
@@ -105,7 +116,7 @@ bot.onText(/\/start/, async (msg) => {
 
   if (!subscribed) {
     return bot.sendMessage(chatId,
-      `⚠️ Botdan foydalanish uchun avval kanalimizga obuna bo'ling:`,
+      `⚠️ Botdan foydalanish uchun avval kanalimizga obuna bo'ling:\n\nSo'rov yuborganingizdan keyin "✅ So'rov yubordim" tugmasini bosing.`,
       { reply_markup: getSubscribeKeyboard() }
     );
   }
@@ -116,7 +127,7 @@ bot.onText(/\/start/, async (msg) => {
   );
 });
 
-// ---- Oddiy xabarlar (to'lov cheki) ----
+// ---- Oddiy xabarlar ----
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
@@ -173,7 +184,7 @@ bot.on('callback_query', async (query) => {
   const chatId = query.message.chat.id;
   const userId = query.from.id;
 
-  // 1. Obuna tekshirish
+  // 1. So'rov yubordim tugmasi
   if (query.data === 'check_sub') {
     const subscribed = await isSubscribed(userId);
     if (subscribed) {
@@ -184,7 +195,7 @@ bot.on('callback_query', async (query) => {
       );
     } else {
       await bot.answerCallbackQuery(query.id, {
-        text: 'Hali obuna bo\'lmadingiz. Avval kanalga qo\'shiling!',
+        text: 'Hali so\'rov yubormagansiz yoki bot sezmagan. Avval kanalga so\'rov yuboring!',
         show_alert: true
       });
     }
@@ -216,10 +227,7 @@ bot.on('callback_query', async (query) => {
 • 3 full IELTS mock exams
 
 To'lovdan keyin chekni va emailingizni yuboring.`,
-      { 
-        parse_mode: 'Markdown',
-        reply_markup: getMainKeyboard() 
-      }
+      { parse_mode: 'Markdown', reply_markup: getMainKeyboard() }
     );
     return;
   }
