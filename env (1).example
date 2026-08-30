@@ -1,0 +1,16 @@
+# Telegram botdan @BotFather orqali olingan token
+TELEGRAM_BOT_TOKEN=123456789:AAExampleTokenHere
+
+# Sizning shaxsiy Telegram chat ID'ingiz (raqam).
+# Buni topish uchun @userinfobot ga /start yozing.
+ADMIN_CHAT_ID=123456789
+
+# Supabase loyihangiz manzili (Project Settings > API)
+SUPABASE_URL=https://xxxxxxxxxxxx.supabase.co
+
+# Supabase "service_role" key (Project Settings > API > service_role)
+# DIQQAT: bu maxfiy kalit, hech kimga bermang, GitHub'ga yuklamang!
+SUPABASE_SERVICE_ROLE_KEY=your-service-role-key-here
+
+# Premium necha kunga beriladi (ixtiyoriy, default: 30)
+PREMIUM_DAYS=30
