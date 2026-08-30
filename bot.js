@@ -2,6 +2,7 @@
    VIVID IELTS — Premium Approval Bot
    + Majburiy kanal (Join Request bilan ishlaydi)
    + Narxlar va Admin tugmalari
+   + CD TESTLAR va BOOKS (Telegram file_id orqali)
    + Keep-alive
    ============================================================ */
 
@@ -54,16 +55,33 @@ if (KEEP_ALIVE_URL) {
   console.log(`[Keep-alive] Enabled → ${KEEP_ALIVE_URL}`);
 }
 
+// ============================================================
+// CD TESTLAR va BOOKS fayllari
+// ------------------------------------------------------------
+// Har bir faylni botga (o'zingiz, admin sifatida) bir marta hujjat
+// (document) qilib yuborgach, Logs'da (Render konsolida) shu
+// faylning "file_id" qiymati chiqadi. O'sha ID'ni shu ro'yxatlarga
+// qo'shing. "title" — foydalanuvchiga chiqadigan nom.
+// ============================================================
+const CD_TEST_FILES = [
+  // { title: 'Reading Test 1', file_id: 'BQACAgIAAxkBAAIB...' },
+  // { title: 'Reading Test 2', file_id: 'BQACAgIAAxkBAAIC...' },
+  // ... jami 15 tagacha shu tarzda qo'shiladi
+];
+
+const BOOK_FILES = [
+  // { title: 'Vocabulary for IELTS', file_id: 'BQACAgIAAxkBAAID...' },
+  // { title: 'Grammar for IELTS', file_id: 'BQACAgIAAxkBAAIE...' },
+];
+
 // ---- So'rov yuborganlarni eslab qolish ----
 const pendingJoinRequests = new Set(); // userId lar
 
 // ---- Kanal tekshirish ----
 async function isSubscribed(userId) {
-  // Agar so'rov yuborgan bo'lsa — ruxsat beramiz
   if (pendingJoinRequests.has(userId)) {
     return true;
   }
-
   try {
     const member = await bot.getChatMember(REQUIRED_CHANNEL, userId);
     return ['member', 'administrator', 'creator'].includes(member.status);
@@ -85,6 +103,7 @@ function getMainKeyboard() {
   return {
     inline_keyboard: [
       [{ text: '💰 Narxlar', callback_data: 'prices' }],
+      [{ text: '📄 CD TESTLAR', callback_data: 'cd_tests' }, { text: '📚 BOOKS', callback_data: 'books' }],
       [{ text: '👤 Admin bilan bog\'lanish', url: `https://t.me/${ADMIN_USERNAME}` }],
       [{ text: '📸 To\'lov chekini yuborish', callback_data: 'send_payment' }]
     ]
@@ -127,6 +146,24 @@ bot.onText(/\/start/, async (msg) => {
   );
 });
 
+// ---- ADMIN: hujjat yuborganda file_id'ni ko'rsatish ----
+// Siz (admin) botga PDF/hujjat yuborganingizda, bot sizga o'sha faylning
+// file_id'sini qaytarib beradi — shuni CD_TEST_FILES yoki BOOK_FILES
+// massiviga nusxalab qo'yasiz.
+bot.on('document', (msg) => {
+  const chatId = msg.chat.id;
+  if (String(chatId) !== String(ADMIN_CHAT_ID)) return; // faqat admindan qabul qilamiz
+
+  const fileId = msg.document.file_id;
+  const fileName = msg.document.file_name || 'nomsiz fayl';
+
+  bot.sendMessage(
+    chatId,
+    `📎 Fayl qabul qilindi: ${fileName}\n\nfile_id:\n\`${fileId}\`\n\nBuni CD_TEST_FILES yoki BOOK_FILES massiviga nusxalang.`,
+    { parse_mode: 'Markdown' }
+  );
+});
+
 // ---- Oddiy xabarlar ----
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
@@ -134,6 +171,7 @@ bot.on('message', async (msg) => {
 
   if (String(chatId) === String(ADMIN_CHAT_ID)) return;
   if (msg.text && msg.text.startsWith('/start')) return;
+  if (msg.document) return; // hujjatlar yuqorida alohida ishlanadi
 
   const subscribed = await isSubscribed(userId);
   if (!subscribed) {
@@ -178,6 +216,15 @@ bot.on('message', async (msg) => {
 
   bot.sendMessage(chatId, 'Rahmat! So\'rovingiz adminga yuborildi, tez orada javob olasiz ⏳');
 });
+
+// ---- Helper: fayllar ro'yxatini tugma qilib chiqarish ----
+function buildFileListKeyboard(files, prefix) {
+  return {
+    inline_keyboard: files.map((f, idx) => [
+      { text: f.title, callback_data: `${prefix}:${idx}` }
+    ])
+  };
+}
 
 // ---- Callback tugmalar ----
 bot.on('callback_query', async (query) => {
@@ -242,7 +289,47 @@ To'lovdan keyin chekni va emailingizni yuboring.`,
     return;
   }
 
-  // ---- Admin tugmalari ----
+  // 4. CD TESTLAR ro'yxati
+  if (query.data === 'cd_tests') {
+    await bot.answerCallbackQuery(query.id);
+    if (CD_TEST_FILES.length === 0) {
+      return bot.sendMessage(chatId, '📄 Hozircha CD testlar qo\'shilmagan. Tez orada qo\'shiladi!');
+    }
+    return bot.sendMessage(chatId, '📄 Kerakli testni tanlang:', {
+      reply_markup: buildFileListKeyboard(CD_TEST_FILES, 'get_cd')
+    });
+  }
+
+  // 5. BOOKS ro'yxati
+  if (query.data === 'books') {
+    await bot.answerCallbackQuery(query.id);
+    if (BOOK_FILES.length === 0) {
+      return bot.sendMessage(chatId, '📚 Hozircha kitoblar qo\'shilmagan. Tez orada qo\'shiladi!');
+    }
+    return bot.sendMessage(chatId, '📚 Kerakli kitobni tanlang:', {
+      reply_markup: buildFileListKeyboard(BOOK_FILES, 'get_book')
+    });
+  }
+
+  // 6. Tanlangan CD test faylini yuborish
+  if (query.data.startsWith('get_cd:')) {
+    const idx = parseInt(query.data.split(':')[1], 10);
+    const file = CD_TEST_FILES[idx];
+    await bot.answerCallbackQuery(query.id);
+    if (!file) return bot.sendMessage(chatId, 'Fayl topilmadi.');
+    return bot.sendDocument(chatId, file.file_id, { caption: file.title });
+  }
+
+  // 7. Tanlangan kitobni yuborish
+  if (query.data.startsWith('get_book:')) {
+    const idx = parseInt(query.data.split(':')[1], 10);
+    const file = BOOK_FILES[idx];
+    await bot.answerCallbackQuery(query.id);
+    if (!file) return bot.sendMessage(chatId, 'Fayl topilmadi.');
+    return bot.sendDocument(chatId, file.file_id, { caption: file.title });
+  }
+
+  // ---- Admin tugmalari (premium berish/rad etish) ----
   if (String(chatId) !== String(ADMIN_CHAT_ID)) return;
 
   const [action, reqId] = query.data.split(':');
