@@ -159,8 +159,7 @@ bot.on('document', (msg) => {
 
   bot.sendMessage(
     chatId,
-    `📎 Fayl qabul qilindi: ${fileName}\n\nfile_id:\n\`${fileId}\`\n\nBuni CD_TEST_FILES yoki BOOK_FILES massiviga nusxalang.`,
-    { parse_mode: 'Markdown' }
+    `📎 Fayl qabul qilindi: ${fileName}\n\nfile_id:\n${fileId}\n\nBuni CD_TEST_FILES yoki BOOK_FILES massiviga nusxalang.`
   );
 });
 
