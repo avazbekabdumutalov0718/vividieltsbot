@@ -1,7 +1,8 @@
 /* ============================================================
    VIVID IELTS — Premium Approval Bot
    + Majburiy kanalga obuna
-   + Keep-alive (Free Render uchun)
+   + Narxlar va Admin tugmalari
+   + Keep-alive
    ============================================================ */
 
 const TelegramBot = require('node-telegram-bot-api');
@@ -16,9 +17,12 @@ const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const PREMIUM_DAYS = parseInt(process.env.PREMIUM_DAYS || '30', 10);
 
-// Kanal sozlamalari
+// Kanal
 const REQUIRED_CHANNEL = process.env.REQUIRED_CHANNEL || '-1004304384442';
 const CHANNEL_INVITE_LINK = 'https://t.me/+0Wiqg6jiVGc4YTEy';
+
+// Admin username (o'zingiznikini yozing)
+const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'avazbekadmin';
 
 if (!BOT_TOKEN || !ADMIN_CHAT_ID || !SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
   console.error('Missing required environment variables.');
@@ -27,7 +31,7 @@ if (!BOT_TOKEN || !ADMIN_CHAT_ID || !SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY)
 
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 
-// ---- HTTP server (Render health checks) ----
+// ---- HTTP server ----
 const PORT = process.env.PORT || 3000;
 http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
@@ -53,7 +57,7 @@ if (KEEP_ALIVE_URL) {
   console.log(`[Keep-alive] Enabled → ${KEEP_ALIVE_URL}`);
 }
 
-// ---- Kanalga obuna tekshirish ----
+// ---- Kanal tekshirish ----
 async function isSubscribed(userId) {
   try {
     const member = await bot.getChatMember(REQUIRED_CHANNEL, userId);
@@ -69,6 +73,16 @@ function getSubscribeKeyboard() {
     inline_keyboard: [
       [{ text: '📢 Kanalga obuna bo\'lish', url: CHANNEL_INVITE_LINK }],
       [{ text: '✅ Obuna bo\'ldim', callback_data: 'check_sub' }]
+    ]
+  };
+}
+
+function getMainKeyboard() {
+  return {
+    inline_keyboard: [
+      [{ text: '💰 Narxlar', callback_data: 'prices' }],
+      [{ text: '👤 Admin bilan bog\'lanish', url: `https://t.me/${ADMIN_USERNAME}` }],
+      [{ text: '📸 To\'lov chekini yuborish', callback_data: 'send_payment' }]
     ]
   };
 }
@@ -97,11 +111,12 @@ bot.onText(/\/start/, async (msg) => {
   }
 
   bot.sendMessage(chatId,
-    `Salom! 👋\n\nPremium tarifga o'tish uchun:\n1) To'lovni amalga oshiring\n2) Shu botga to'lov chekini (screenshot) VA saytda ro'yxatdan o'tgan emailingizni yuboring\n\nAdmin tekshirib, tez orada Premiumni faollashtiradi ✅`
+    `Salom! 👋\n\nVIVID IELTS Premium botiga xush kelibsiz!\n\nQuyidagi tugmalardan birini tanlang:`,
+    { reply_markup: getMainKeyboard() }
   );
 });
 
-// ---- Oddiy xabarlar ----
+// ---- Oddiy xabarlar (to'lov cheki) ----
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
@@ -109,7 +124,6 @@ bot.on('message', async (msg) => {
   if (String(chatId) === String(ADMIN_CHAT_ID)) return;
   if (msg.text && msg.text.startsWith('/start')) return;
 
-  // Obuna tekshirish
   const subscribed = await isSubscribed(userId);
   if (!subscribed) {
     return bot.sendMessage(chatId,
@@ -159,13 +173,14 @@ bot.on('callback_query', async (query) => {
   const chatId = query.message.chat.id;
   const userId = query.from.id;
 
-  // Obuna tekshirish tugmasi
+  // 1. Obuna tekshirish
   if (query.data === 'check_sub') {
     const subscribed = await isSubscribed(userId);
     if (subscribed) {
       await bot.answerCallbackQuery(query.id, { text: 'Rahmat! Endi botdan foydalanishingiz mumkin ✅' });
       await bot.sendMessage(chatId,
-        `Salom! 👋\n\nPremium tarifga o'tish uchun:\n1) To'lovni amalga oshiring\n2) Shu botga to'lov chekini (screenshot) VA saytda ro'yxatdan o'tgan emailingizni yuboring\n\nAdmin tekshirib, tez orada Premiumni faollashtiradi ✅`
+        `Salom! 👋\n\nVIVID IELTS Premium botiga xush kelibsiz!\n\nQuyidagi tugmalardan birini tanlang:`,
+        { reply_markup: getMainKeyboard() }
       );
     } else {
       await bot.answerCallbackQuery(query.id, {
@@ -176,7 +191,50 @@ bot.on('callback_query', async (query) => {
     return;
   }
 
-  // Faqat admin tugmalari
+  // 2. Narxlar
+  if (query.data === 'prices') {
+    await bot.answerCallbackQuery(query.id);
+    await bot.sendMessage(chatId,
+`💰 *VIVID IELTS Tariflari:*
+
+🟢 *Free* — 0 so'm
+• Limited lesson access
+• 2 Reading mock tests
+• 2 Full Listening mock tests
+
+🔵 *Premium* — ~79,000 UZS/oy~
+• 30 full Reading & Listening mock tests
+• Certificate on completion
+• Keyword tables & wordlists
+• Writing mock test + AI review
+• Full article library access
+
+🟣 *Pro* — ~249,000 UZS/oy~
+• Everything in Premium
+• Article library + topic wordlists
+• Full Speaking mock test
+• 3 full IELTS mock exams
+
+To'lovdan keyin chekni va emailingizni yuboring.`,
+      { 
+        parse_mode: 'Markdown',
+        reply_markup: getMainKeyboard() 
+      }
+    );
+    return;
+  }
+
+  // 3. To'lov chekini yuborish
+  if (query.data === 'send_payment') {
+    await bot.answerCallbackQuery(query.id);
+    await bot.sendMessage(chatId,
+      `📸 Iltimos, to'lov chekini (screenshot) va saytda ro'yxatdan o'tgan *emailingizni* yuboring.\n\nMisol:\nemail@gmail.com`,
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+
+  // ---- Admin tugmalari ----
   if (String(chatId) !== String(ADMIN_CHAT_ID)) return;
 
   const [action, reqId] = query.data.split(':');
