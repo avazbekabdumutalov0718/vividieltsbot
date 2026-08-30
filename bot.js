@@ -64,9 +64,21 @@ if (KEEP_ALIVE_URL) {
 // qo'shing. "title" — foydalanuvchiga chiqadigan nom.
 // ============================================================
 const CD_TEST_FILES = [
-  // { title: 'Reading Test 1', file_id: 'BQACAgIAAxkBAAIB...' },
-  // { title: 'Reading Test 2', file_id: 'BQACAgIAAxkBAAIC...' },
-  // ... jami 15 tagacha shu tarzda qo'shiladi
+  { title: 'Passage 1.html (1)', file_id: 'BQACAgIAAxkBAAOAapQo_mJtZrWq7jpm39kN04V8O1sAAsqZAAL9ioBL7hFuo10N35I9BA' },
+  { title: 'Passage 3.html (1)', file_id: 'BQACAgIAAxkBAAODapQo_nBkqoiiipXZU9yt9X6tAS8AAt6YAAJrZaFL06AwtqVn0vM9BA' },
+  { title: 'CDI Passage 1.html (1)', file_id: 'BQACAgIAAxkBAAOCapQo_nG1OfM2stjdk0pmguXCHH8AAnaXAAJrZZFLgXUrfFj1b349BA' },
+  { title: 'CDI Passage 3.html (1)', file_id: 'BQACAgIAAxkBAAOBapQo_gp4Rd-JwFLF-gABX5HzpB0IAALMlgACa2WRS-09q5wfpvKFPQQ' },
+  { title: 'Passage 1.html (2)', file_id: 'BQACAgIAAxkBAAOEapQo_koNz66maT7SnfhkdxN272QAAuOLAAIHa6hLGCVYBpJqLjk9BA' },
+  { title: 'Passage 3.html (2)', file_id: 'BQACAgIAAxkBAAOFapQo_rOwOGdMllhg2WYKq60e5P0AAn2dAAJDC7BLyKS7lX_G92o9BA' },
+  { title: 'CDI Passage 3.html (2)', file_id: 'BQACAgIAAxkBAAOJapQo_kH3h95Ekb6Y2EKZLGxIfasAAsebAALhOSFIJRv4sJn5zEM9BA' },
+  { title: 'Passage 2.html (1)', file_id: 'BQACAgIAAxkBAAOMapQo_scZvNNPI7wFlE0nh5ufm9gAAkebAAK8hrBJcaqXfcFn1nY9BA' },
+  { title: 'Passage 2.html (2)', file_id: 'BQACAgIAAxkBAAOKapQo_pz31MBbluwMlwoQJurLUvIAAtCgAAKQdYhJJJBxZ7dQuYM9BA' },
+  { title: 'Passage 1.html (3)', file_id: 'BQACAgIAAxkBAAOLapQo_o940c1_BTcvqNzLoVGuOjEAAh2eAAJJrEhIgQbWO5Z3WV49BA' },
+  { title: 'Passage 1.html (4)', file_id: 'BQACAgIAAxkBAAOHapQo_o-1fMLYWK8CRJxoGB0gHGkAAoCbAALVROFLxrit1XCJUuA9BA' },
+  { title: 'Passage 3.html (3)', file_id: 'BQACAgIAAxkBAAOIapQo_je1WaCbEtI1BrqJoU68_GgAAuaaAAKxi-hLyNsrjSFBW789BA' },
+  { title: 'CDI Passage 1.html (2)', file_id: 'BQACAgIAAxkBAAOGapQo_k7lm9hxfp_P9L3CbUwcMOsAAiWTAALVRNlL2GGo6J1yRmI9BA' },
+  { title: 'Passage 2.html (3)', file_id: 'BQACAgIAAxkBAAONapQo_mHYsFQMKFrKbgJPtMfSjUMAAkuUAAIgaKhJIq8XTd29pX09BA' },
+  { title: 'Passage 1.html (5)', file_id: 'BQACAgIAAxkBAAOOapQo_qQ4DVjr5OuZx8WDs_YCOnAAAnuqAAIgaKBJp4cbrwIPtQ49BA' },
 ];
 
 const BOOK_FILES = [
@@ -288,15 +300,21 @@ To'lovdan keyin chekni va emailingizni yuboring.`,
     return;
   }
 
-  // 4. CD TESTLAR ro'yxati
+  // 4. CD TESTLAR — barcha fayllarni birdaniga yuborish
   if (query.data === 'cd_tests') {
     await bot.answerCallbackQuery(query.id);
     if (CD_TEST_FILES.length === 0) {
       return bot.sendMessage(chatId, '📄 Hozircha CD testlar qo\'shilmagan. Tez orada qo\'shiladi!');
     }
-    return bot.sendMessage(chatId, '📄 Kerakli testni tanlang:', {
-      reply_markup: buildFileListKeyboard(CD_TEST_FILES, 'get_cd')
-    });
+    await bot.sendMessage(chatId, `📄 ${CD_TEST_FILES.length} ta fayl yuborilmoqda...`);
+    for (const file of CD_TEST_FILES) {
+      try {
+        await bot.sendDocument(chatId, file.file_id, { caption: file.title });
+      } catch (e) {
+        console.error(`Faylni yuborishda xato (${file.title}):`, e.message);
+      }
+    }
+    return;
   }
 
   // 5. BOOKS ro'yxati
