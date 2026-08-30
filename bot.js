@@ -21,6 +21,7 @@ const PREMIUM_DAYS = parseInt(process.env.PREMIUM_DAYS || '30', 10);
 const REQUIRED_CHANNEL = process.env.REQUIRED_CHANNEL || '-1004304384442';
 const CHANNEL_INVITE_LINK = 'https://t.me/+0Wiqg6jiVGc4YTEy';
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'vividieltsadmin';
+const SITE_URL = process.env.SITE_URL || 'https://vividieltsmain.vercel.app/';
 
 if (!BOT_TOKEN || !ADMIN_CHAT_ID || !SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
   console.error('Missing required environment variables.');
@@ -139,6 +140,7 @@ function getSubscribeKeyboard() {
   return {
     inline_keyboard: [
       [{ text: '📢 Kanalga obuna bo\'lish', url: CHANNEL_INVITE_LINK }],
+      [{ text: '🌐 Bizning sayt', url: SITE_URL }],
       [{ text: '✅ So\'rov yubordim', callback_data: 'check_sub' }]
     ]
   };
@@ -149,6 +151,7 @@ function getMainKeyboard() {
     inline_keyboard: [
       [{ text: '💰 Narxlar', callback_data: 'prices' }],
       [{ text: '📄 CD TESTLAR', callback_data: 'cd_tests' }, { text: '📚 BOOKS', callback_data: 'books' }],
+      [{ text: '🌐 Sayt havolasi', url: SITE_URL }],
       [{ text: '👤 Admin bilan bog\'lanish', url: `https://t.me/${ADMIN_USERNAME}` }],
       [{ text: '📸 To\'lov chekini yuborish', callback_data: 'send_payment' }]
     ]
@@ -347,6 +350,15 @@ To'lovdan keyin chekni va emailingizni yuboring.`,
         console.error(`Faylni yuborishda xato (${file.title}):`, e.message);
       }
     }
+    await bot.sendMessage(
+      chatId,
+      `✅ Barcha testlar yuborildi!\n\n📚 Ko'proq real exam testlar uchun saytimizga tashrif buyuring:`,
+      {
+        reply_markup: {
+          inline_keyboard: [[{ text: '🌐 Saytga o\'tish', url: SITE_URL }]]
+        }
+      }
+    );
     return;
   }
 
