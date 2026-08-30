@@ -1,19 +1,7 @@
 /* ============================================================
    VIVID IELTS — Premium Approval Bot
-   ------------------------------------------------------------
-   Flow:
-   1. A user sends /start, is told to send their full name +
-      the email they registered on the site with, after paying.
-   2. Any text message from a user is treated as a "payment claim"
-      and forwarded to the ADMIN with two buttons:
-        ✅ Premium berish   ❌ Rad etish
-   3. When the admin taps "✅ Premium berish", the bot calls the
-      Supabase REST API (using the SERVICE ROLE key, which bypasses
-      row-level security) and:
-        - finds the user in auth.users by email
-        - upserts a row in "profiles" with tariff='premium' and
-          premium_expires_at = now() + PREMIUM_DAYS
-      Then it confirms to both the admin and the original user.
+   + Majburiy kanalga obuna
+   + Keep-alive (Free Render uchun)
    ============================================================ */
 
 const TelegramBot = require('node-telegram-bot-api');
@@ -21,49 +9,71 @@ const fetch = require('node-fetch');
 const http = require('http');
 const https = require('https');
 
-// ---- Required environment variables ----
+// ---- Environment variables ----
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const PREMIUM_DAYS = parseInt(process.env.PREMIUM_DAYS || '30', 10);
 
+// Kanal sozlamalari
+const REQUIRED_CHANNEL = process.env.REQUIRED_CHANNEL || '-1004304384442';
+const CHANNEL_INVITE_LINK = 'https://t.me/+0Wiqg6jiVGc4YTEy';
+
 if (!BOT_TOKEN || !ADMIN_CHAT_ID || !SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-  console.error('Missing required environment variables. Check your .env file / hosting config.');
+  console.error('Missing required environment variables.');
   process.exit(1);
 }
 
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 
-// ---- Minimal HTTP server (Render health checks uchun) ----
+// ---- HTTP server (Render health checks) ----
 const PORT = process.env.PORT || 3000;
-http
-  .createServer((req, res) => {
-    res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('Premium bot is running.');
-  })
-  .listen(PORT, () => {
-    console.log(`HTTP server listening on port ${PORT} (for Render health checks)`);
-  });
+http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('Premium bot is running.');
+}).listen(PORT, () => {
+  console.log(`HTTP server listening on port ${PORT}`);
+});
 
-// ---- Keep-alive (Free Render Web Service uchun) ----
-const KEEP_ALIVE_URL = process.env.KEEP_ALIVE_URL || 
-  (process.env.RENDER_EXTERNAL_HOSTNAME 
-    ? `https://${process.env.RENDER_EXTERNAL_HOSTNAME}` 
+// ---- Keep-alive ----
+const KEEP_ALIVE_URL = process.env.KEEP_ALIVE_URL ||
+  (process.env.RENDER_EXTERNAL_HOSTNAME
+    ? `https://${process.env.RENDER_EXTERNAL_HOSTNAME}`
     : null);
 
 if (KEEP_ALIVE_URL) {
   setInterval(() => {
     https.get(KEEP_ALIVE_URL, (res) => {
-      console.log(`[Keep-alive] ${KEEP_ALIVE_URL} → ${res.statusCode}`);
+      console.log(`[Keep-alive] ${res.statusCode}`);
     }).on('error', (err) => {
       console.log(`[Keep-alive] Error: ${err.message}`);
     });
-  }, 4 * 60 * 1000); // har 4 daqiqada
+  }, 4 * 60 * 1000);
   console.log(`[Keep-alive] Enabled → ${KEEP_ALIVE_URL}`);
 }
 
-// In-memory store
+// ---- Kanalga obuna tekshirish ----
+async function isSubscribed(userId) {
+  try {
+    const member = await bot.getChatMember(REQUIRED_CHANNEL, userId);
+    return ['member', 'administrator', 'creator'].includes(member.status);
+  } catch (e) {
+    console.error('Kanal tekshirish xatosi:', e.message);
+    return false;
+  }
+}
+
+function getSubscribeKeyboard() {
+  return {
+    inline_keyboard: [
+      [{ text: '📢 Kanalga obuna bo\'lish', url: CHANNEL_INVITE_LINK }],
+      [{ text: '✅ Obuna bo\'ldim', callback_data: 'check_sub' }]
+    ]
+  };
+}
+
+// ---- In-memory store ----
 const pendingRequests = {};
 let requestCounter = 1;
 
@@ -73,25 +83,47 @@ function extractEmail(text) {
 }
 
 // ---- /start ----
-bot.onText(/\/start/, (msg) => {
-  bot.sendMessage(
-    msg.chat.id,
+bot.onText(/\/start/, async (msg) => {
+  const chatId = msg.chat.id;
+  const userId = msg.from.id;
+
+  const subscribed = await isSubscribed(userId);
+
+  if (!subscribed) {
+    return bot.sendMessage(chatId,
+      `⚠️ Botdan foydalanish uchun avval kanalimizga obuna bo'ling:`,
+      { reply_markup: getSubscribeKeyboard() }
+    );
+  }
+
+  bot.sendMessage(chatId,
     `Salom! 👋\n\nPremium tarifga o'tish uchun:\n1) To'lovni amalga oshiring\n2) Shu botga to'lov chekini (screenshot) VA saytda ro'yxatdan o'tgan emailingizni yuboring\n\nAdmin tekshirib, tez orada Premiumni faollashtiradi ✅`
   );
 });
 
-// ---- Any message from a normal user (not the admin) ----
+// ---- Oddiy xabarlar ----
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
+  const userId = msg.from.id;
+
   if (String(chatId) === String(ADMIN_CHAT_ID)) return;
   if (msg.text && msg.text.startsWith('/start')) return;
+
+  // Obuna tekshirish
+  const subscribed = await isSubscribed(userId);
+  if (!subscribed) {
+    return bot.sendMessage(chatId,
+      `⚠️ Avval kanalga obuna bo'ling:`,
+      { reply_markup: getSubscribeKeyboard() }
+    );
+  }
 
   const text = msg.caption || msg.text || '';
   const email = extractEmail(text);
 
   const reqId = String(requestCounter++);
   pendingRequests[reqId] = {
-    email: email,
+    email,
     userChatId: chatId,
     userName: [msg.from.first_name, msg.from.last_name].filter(Boolean).join(' '),
     username: msg.from.username ? '@' + msg.from.username : '(username yo\'q)',
@@ -122,9 +154,30 @@ bot.on('message', async (msg) => {
   bot.sendMessage(chatId, 'Rahmat! So\'rovingiz adminga yuborildi, tez orada javob olasiz ⏳');
 });
 
-// ---- Admin taps a button ----
+// ---- Callback tugmalar ----
 bot.on('callback_query', async (query) => {
-  if (String(query.message.chat.id) !== String(ADMIN_CHAT_ID)) return;
+  const chatId = query.message.chat.id;
+  const userId = query.from.id;
+
+  // Obuna tekshirish tugmasi
+  if (query.data === 'check_sub') {
+    const subscribed = await isSubscribed(userId);
+    if (subscribed) {
+      await bot.answerCallbackQuery(query.id, { text: 'Rahmat! Endi botdan foydalanishingiz mumkin ✅' });
+      await bot.sendMessage(chatId,
+        `Salom! 👋\n\nPremium tarifga o'tish uchun:\n1) To'lovni amalga oshiring\n2) Shu botga to'lov chekini (screenshot) VA saytda ro'yxatdan o'tgan emailingizni yuboring\n\nAdmin tekshirib, tez orada Premiumni faollashtiradi ✅`
+      );
+    } else {
+      await bot.answerCallbackQuery(query.id, {
+        text: 'Hali obuna bo\'lmadingiz. Avval kanalga qo\'shiling!',
+        show_alert: true
+      });
+    }
+    return;
+  }
+
+  // Faqat admin tugmalari
+  if (String(chatId) !== String(ADMIN_CHAT_ID)) return;
 
   const [action, reqId] = query.data.split(':');
   const req = pendingRequests[reqId];
@@ -136,7 +189,7 @@ bot.on('callback_query', async (query) => {
   if (action === 'reject') {
     delete pendingRequests[reqId];
     await bot.editMessageReplyMarkup({ inline_keyboard: [] }, {
-      chat_id: query.message.chat.id,
+      chat_id: chatId,
       message_id: query.message.message_id,
     });
     await bot.sendMessage(ADMIN_CHAT_ID, '❌ Rad etildi.');
@@ -161,7 +214,7 @@ bot.on('callback_query', async (query) => {
 
       delete pendingRequests[reqId];
       await bot.editMessageReplyMarkup({ inline_keyboard: [] }, {
-        chat_id: query.message.chat.id,
+        chat_id: chatId,
         message_id: query.message.message_id,
       });
       await bot.sendMessage(
@@ -181,7 +234,7 @@ bot.on('callback_query', async (query) => {
   }
 });
 
-// ---- Supabase helper ----
+// ---- Supabase ----
 async function grantPremium(email, days) {
   const listRes = await fetch(
     `${SUPABASE_URL}/auth/v1/admin/users?email=${encodeURIComponent(email)}`,
