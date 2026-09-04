@@ -4,6 +4,14 @@
    + Narxlar va Admin tugmalari
    + CD TESTLAR va BOOKS (Telegram file_id orqali)
    + Keep-alive
+   + ✍️ WRITING CHECKER:
+       - Saytdagi Mock Test > Writing bo'limidan yuborilgan insholar — BEPUL
+         (sayt backend /submit-writing endpointiga POST qiladi, bot buni
+         adminga forward qiladi, natija /natija <kod> orqali olinadi)
+       - Botning o'zidan to'g'ridan-to'g'ri yuborilgan insholar — PULLIK
+         (narx: WRITING_PRICE, to'lov admin tomonidan tasdiqlanadi)
+       - Admin forward qilingan insho xabariga REPLY qilib baho/izoh yozadi,
+         bot buni avtomatik talabaga (yoki /natija orqali) yetkazadi.
    ============================================================ */
 
 const TelegramBot = require('node-telegram-bot-api');
@@ -23,6 +31,9 @@ const CHANNEL_INVITE_LINK = 'https://t.me/+0Wiqg6jiVGc4YTEy';
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'vividieltsadmin';
 const SITE_URL = process.env.SITE_URL || 'https://vividieltsmain.vercel.app/';
 
+// Botning o'zidan to'g'ridan-to'g'ri Writing tekshirtirish narxi
+const WRITING_PRICE_TEXT = process.env.WRITING_PRICE_TEXT || "12,000 so'm";
+
 if (!BOT_TOKEN || !ADMIN_CHAT_ID || !SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
   console.error('Missing required environment variables.');
   process.exit(1);
@@ -30,9 +41,101 @@ if (!BOT_TOKEN || !ADMIN_CHAT_ID || !SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY)
 
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 
-// ---- HTTP server ----
+// ---- HTTP server (+ /submit-writing endpoint sayt uchun) ----
 const PORT = process.env.PORT || 3000;
-http.createServer((req, res) => {
+
+function readJsonBody(req) {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.on('data', (chunk) => {
+      body += chunk;
+      if (body.length > 1_000_000) { // 1MB himoya
+        reject(new Error('Payload too large'));
+        req.destroy();
+      }
+    });
+    req.on('end', () => {
+      try {
+        resolve(body ? JSON.parse(body) : {});
+      } catch (e) {
+        reject(e);
+      }
+    });
+    req.on('error', reject);
+  });
+}
+
+http.createServer(async (req, res) => {
+  // CORS — sayt frontendidan (boshqa domendan) so'rov kelishi mumkin
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204);
+    return res.end();
+  }
+
+  if (req.method === 'POST' && req.url === '/submit-writing') {
+    try {
+      const data = await readJsonBody(req);
+      const email = (data.email || '').trim();
+      const studentName = (data.studentName || '').trim();
+      const taskType = (data.taskType || 'Task 2').trim();
+      const essayText = (data.essayText || '').trim();
+
+      if (essayText.length < 20) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ ok: false, message: 'Insho matni juda qisqa.' }));
+      }
+
+      const code = generateResultCode();
+      writingSubmissions[code] = {
+        source: 'site',
+        email: email || null,
+        studentName: studentName || null,
+        taskType,
+        essayText,
+        status: 'pending',
+        feedback: null,
+        band: null,
+        studentChatId: null, // sayt orqali kelgan insholarda chat yo'q, natija /natija orqali olinadi
+        createdAt: Date.now(),
+      };
+
+      const header =
+        `✍️ Yangi Writing (🌐 SAYT orqali — BEPUL)\n\n` +
+        `🔑 Kod: ${code}\n` +
+        `👤 Ism: ${studentName || '(kiritilmagan)'}\n` +
+        `📧 Email: ${email || '(kiritilmagan)'}\n` +
+        `📝 Task: ${taskType}\n\n` +
+        `— Insho matni quyida —`;
+
+      await bot.sendMessage(ADMIN_CHAT_ID, header);
+      const chunks = splitLongText(essayText);
+      let lastMsg = null;
+      for (const chunk of chunks) {
+        lastMsg = await bot.sendMessage(ADMIN_CHAT_ID, chunk);
+      }
+      // Admin shu OXIRGI qismga REPLY qilsa, tizim uni shu kodga bog'laydi
+      if (lastMsg) {
+        adminMsgToCode[lastMsg.message_id] = code;
+        writingSubmissions[code].adminMsgId = lastMsg.message_id;
+      }
+      await bot.sendMessage(
+        ADMIN_CHAT_ID,
+        `👆 Baholash uchun YUQORIDAGI oxirgi xabarga REPLY qilib, baho va izohingizni yozing.\n(Masalan: "Band: 6.5\\nIzoh: ...")`
+      );
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ ok: true, code }));
+    } catch (e) {
+      console.error('submit-writing error:', e);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ ok: false, message: 'Server xatosi.' }));
+    }
+  }
+
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end('Premium bot is running.');
 }).listen(PORT, () => {
@@ -58,11 +161,6 @@ if (KEEP_ALIVE_URL) {
 
 // ============================================================
 // CD TESTLAR va BOOKS fayllari
-// ------------------------------------------------------------
-// Har bir faylni botga (o'zingiz, admin sifatida) bir marta hujjat
-// (document) qilib yuborgach, Logs'da (Render konsolida) shu
-// faylning "file_id" qiymati chiqadi. O'sha ID'ni shu ro'yxatlarga
-// qo'shing. "title" — foydalanuvchiga chiqadigan nom.
 // ============================================================
 const CD_TEST_FILES = [
   { title: 'Passage 1.html (1)', file_id: 'BQACAgIAAxkBAAOAapQo_mJtZrWq7jpm39kN04V8O1sAAsqZAAL9ioBL7hFuo10N35I9BA' },
@@ -151,6 +249,7 @@ function getMainKeyboard() {
     inline_keyboard: [
       [{ text: '💰 Narxlar', callback_data: 'prices' }],
       [{ text: '📄 CD TESTLAR', callback_data: 'cd_tests' }, { text: '📚 BOOKS', callback_data: 'books' }],
+      [{ text: '✍️ Writing Checker', callback_data: 'writing_checker' }],
       [{ text: '🌐 Sayt havolasi', url: SITE_URL }],
       [{ text: '👤 Admin bilan bog\'lanish', url: `https://t.me/${ADMIN_USERNAME}` }],
       [{ text: '📸 To\'lov chekini yuborish', callback_data: 'send_payment' }]
@@ -165,9 +264,32 @@ bot.on('chat_join_request', (msg) => {
   console.log(`Yangi join request: ${userId} (${msg.from.first_name})`);
 });
 
-// ---- In-memory store (to'lovlar uchun) ----
+// ---- In-memory store (premium to'lovlar uchun) ----
 const pendingRequests = {};
 let requestCounter = 1;
+
+// ---- In-memory store (Writing Checker uchun) ----
+const writingSubmissions = {};             // code -> { source, email, studentName, taskType, essayText, status, feedback, band, studentChatId, adminMsgId, createdAt }
+const adminMsgToCode = {};                 // admin xabar ID -> code
+const awaitingWritingPayment = new Set();  // userId lar: "Writing Checker" ni tanladi, to'lov chekini kutyapmiz
+const writingApproved = new Set();         // userId lar: to'lov tasdiqlandi, insho matnini kutyapmiz
+const pendingWritingRequests = {};         // reqId -> { userChatId, userName, username }
+let writingReqCounter = 1;
+
+function generateResultCode() {
+  return Math.floor(100000 + Math.random() * 900000).toString();
+}
+
+function splitLongText(text, maxLen = 3500) {
+  const parts = [];
+  let t = text;
+  while (t.length > maxLen) {
+    parts.push(t.slice(0, maxLen));
+    t = t.slice(maxLen);
+  }
+  parts.push(t);
+  return parts;
+}
 
 function extractEmail(text) {
   const match = text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
@@ -175,7 +297,7 @@ function extractEmail(text) {
 }
 
 // ---- /start ----
-bot.onText(/\/start/, async (msg) => {
+bot.onText(/\/start(?:\s+(.+))?/, async (msg) => {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
 
@@ -194,10 +316,36 @@ bot.onText(/\/start/, async (msg) => {
   );
 });
 
+// ---- /natija <kod> — saytdan yuborilgan Writing natijasini olish ----
+bot.onText(/\/natija(?:\s+(.+))?/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const code = match && match[1] ? match[1].trim() : null;
+
+  if (!code) {
+    return bot.sendMessage(chatId,
+      `Natijangizni bilish uchun kodingiz bilan shu ko'rinishda yuboring:\n/natija 123456\n\n(Kodni saytda Writing testini yakunlagach olgansiz)`
+    );
+  }
+
+  const sub = writingSubmissions[code];
+  if (!sub) {
+    return bot.sendMessage(chatId, '❗ Bunday kod topilmadi. Kodni to\'g\'ri kiritganingizni tekshiring.');
+  }
+
+  if (sub.status !== 'reviewed') {
+    return bot.sendMessage(chatId,
+      '⏳ Natijangiz hali tayyor emas. Javob odatda 12–24 soat ichida keladi. Birozdan keyin qayta urinib ko\'ring:\n/natija ' + code
+    );
+  }
+
+  bot.sendMessage(chatId,
+    `📝 Writing natijangiz (kod: ${code})\n\n` +
+    (sub.band ? `🎯 Band: ${sub.band}\n\n` : '') +
+    `💬 Fikr-mulohaza:\n${sub.feedback}`
+  );
+});
+
 // ---- ADMIN: hujjat yuborganda file_id'ni ko'rsatish ----
-// Siz (admin) botga PDF/hujjat yuborganingizda, bot sizga o'sha faylning
-// file_id'sini qaytarib beradi — shuni CD_TEST_FILES yoki BOOK_FILES
-// massiviga nusxalab qo'yasiz.
 bot.on('document', (msg) => {
   const chatId = msg.chat.id;
   if (String(chatId) !== String(ADMIN_CHAT_ID)) return; // faqat admindan qabul qilamiz
@@ -211,6 +359,47 @@ bot.on('document', (msg) => {
   );
 });
 
+// ---- ADMIN: forward qilingan Writing xabariga REPLY qilib baholash ----
+bot.on('message', async (msg) => {
+  if (String(msg.chat.id) !== String(ADMIN_CHAT_ID)) return;
+  if (!msg.reply_to_message) return;
+
+  const repliedId = msg.reply_to_message.message_id;
+  const code = adminMsgToCode[repliedId];
+  if (!code) return; // bu reply Writing xabariga tegishli emas
+
+  const sub = writingSubmissions[code];
+  if (!sub) return;
+
+  const feedbackText = msg.text || msg.caption || '';
+  if (!feedbackText.trim()) return;
+
+  let band = null;
+  const bandMatch = feedbackText.match(/band[:\s]+([0-9]+(\.[0-9])?)/i);
+  if (bandMatch) band = bandMatch[1];
+
+  sub.feedback = feedbackText;
+  sub.band = band;
+  sub.status = 'reviewed';
+
+  if (sub.source === 'bot' && sub.studentChatId) {
+    try {
+      await bot.sendMessage(sub.studentChatId,
+        `📝 Writing natijangiz tayyor!\n\n` +
+        (band ? `🎯 Band: ${band}\n\n` : '') +
+        `💬 Fikr-mulohaza:\n${feedbackText}`
+      );
+    } catch (e) {
+      console.error('Talabaga yuborishda xato:', e.message);
+    }
+  }
+
+  bot.sendMessage(ADMIN_CHAT_ID,
+    `✅ Natija saqlandi${sub.source === 'bot' ? ' va talabaga yuborildi' : ''}.\n(Kod: ${code}${sub.email ? ', email: ' + sub.email : ''})` +
+    (sub.source === 'site' ? '\n\nTalaba natijani /natija ' + code + ' orqali botdan oladi.' : '')
+  );
+});
+
 // ---- Oddiy xabarlar ----
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
@@ -218,6 +407,7 @@ bot.on('message', async (msg) => {
 
   if (String(chatId) === String(ADMIN_CHAT_ID)) return;
   if (msg.text && msg.text.startsWith('/start')) return;
+  if (msg.text && msg.text.startsWith('/natija')) return;
   if (msg.document) return; // hujjatlar yuqorida alohida ishlanadi
 
   const subscribed = await isSubscribed(userId);
@@ -229,6 +419,89 @@ bot.on('message', async (msg) => {
   }
 
   const text = msg.caption || msg.text || '';
+
+  // ---- 1) To'lovi tasdiqlangan foydalanuvchi — bu xabar uning INSHOSI ----
+  if (writingApproved.has(userId)) {
+    if (!text || text.trim().length < 20) {
+      return bot.sendMessage(chatId, 'Iltimos, Writing (insho) matningizni to\'liq matn shaklida yuboring (kamida bir necha jumla).');
+    }
+    writingApproved.delete(userId);
+
+    const code = generateResultCode();
+    writingSubmissions[code] = {
+      source: 'bot',
+      email: null,
+      studentName: [msg.from.first_name, msg.from.last_name].filter(Boolean).join(' '),
+      taskType: 'Task 2',
+      essayText: text,
+      status: 'pending',
+      feedback: null,
+      band: null,
+      studentChatId: chatId,
+      createdAt: Date.now(),
+    };
+
+    const header =
+      `✍️ Yangi Writing (🤖 BOT orqali — PULLIK, tasdiqlangan)\n\n` +
+      `🔑 Kod: ${code}\n` +
+      `👤 Ism: ${writingSubmissions[code].studentName}\n` +
+      `🔗 Username: ${msg.from.username ? '@' + msg.from.username : '(yo\'q)'}\n\n` +
+      `— Insho matni quyida —`;
+
+    await bot.sendMessage(ADMIN_CHAT_ID, header);
+    const chunks = splitLongText(text);
+    let lastMsg = null;
+    for (const chunk of chunks) {
+      lastMsg = await bot.sendMessage(ADMIN_CHAT_ID, chunk);
+    }
+    if (lastMsg) {
+      adminMsgToCode[lastMsg.message_id] = code;
+      writingSubmissions[code].adminMsgId = lastMsg.message_id;
+    }
+    await bot.sendMessage(
+      ADMIN_CHAT_ID,
+      `👆 Baholash uchun YUQORIDAGI oxirgi xabarga REPLY qilib, baho va izohingizni yozing.\n(Masalan: "Band: 6.5\\nIzoh: ...")`
+    );
+
+    return bot.sendMessage(chatId,
+      `✅ Inshoyingiz qabul qilindi!\n\n⏳ Javob odatda 12–24 soat ichida shu chatga keladi.`
+    );
+  }
+
+  // ---- 2) Writing Checker uchun to'lov kutilayotgan foydalanuvchi — bu xabar TO'LOV CHEKI ----
+  if (awaitingWritingPayment.has(userId)) {
+    awaitingWritingPayment.delete(userId);
+
+    const reqId = 'w' + String(writingReqCounter++);
+    pendingWritingRequests[reqId] = {
+      userChatId: chatId,
+      userName: [msg.from.first_name, msg.from.last_name].filter(Boolean).join(' '),
+      username: msg.from.username ? '@' + msg.from.username : '(username yo\'q)',
+    };
+
+    try {
+      await bot.forwardMessage(ADMIN_CHAT_ID, chatId, msg.message_id);
+    } catch (e) {}
+
+    await bot.sendMessage(ADMIN_CHAT_ID,
+      `✍️ Writing Checker — to'lov da'vosi\n\n` +
+      `👤 Ism: ${pendingWritingRequests[reqId].userName}\n` +
+      `🔗 Username: ${pendingWritingRequests[reqId].username}\n` +
+      `💵 Narx: ${WRITING_PRICE_TEXT}`,
+      {
+        reply_markup: {
+          inline_keyboard: [[
+            { text: '✅ Ruxsat berish', callback_data: `approve_writing:${reqId}` },
+            { text: '❌ Rad etish', callback_data: `reject_writing:${reqId}` },
+          ]]
+        }
+      }
+    );
+
+    return bot.sendMessage(chatId, 'Rahmat! To\'lov cheki adminga yuborildi, tasdiqlangach insho yuborishingiz mumkin bo\'ladi ⏳');
+  }
+
+  // ---- 3) Aks holda — bu PREMIUM uchun to'lov da'vosi (avvalgi flow) ----
   const email = extractEmail(text);
 
   const reqId = String(requestCounter++);
@@ -389,6 +662,65 @@ To'lovdan keyin chekni va emailingizni yuboring.`,
     await bot.answerCallbackQuery(query.id);
     if (!file) return bot.sendMessage(chatId, 'Fayl topilmadi.');
     return bot.sendDocument(chatId, file.file_id, { caption: file.title });
+  }
+
+  // 8. Writing Checker menyusi
+  if (query.data === 'writing_checker') {
+    await bot.answerCallbackQuery(query.id);
+    await bot.sendMessage(chatId,
+      `✍️ *Writing Checker*\n\n` +
+      `Bot orqali to'g'ridan-to'g'ri insho (Writing) yuborib tekshirtirish narxi: *${WRITING_PRICE_TEXT}*.\n\n` +
+      `To'lovni amalga oshirib, chekni (screenshot) shu yerga yuboring. Admin tasdiqlagach, inshoyingizni matn shaklida yuborishingiz mumkin bo'ladi. Javob 12–24 soat ichida keladi.\n\n` +
+      `📌 Eslatma: agar saytimizdagi *Mock Test → Writing* bo'limida insho yozgan bo'lsangiz — bu *BEPUL*. Natijangizni bilish uchun shu botga /natija <kodingiz> deb yuboring.`,
+      {
+        parse_mode: 'Markdown',
+        reply_markup: {
+          inline_keyboard: [[{ text: '👤 Admin bilan bog\'lanish', url: `https://t.me/${ADMIN_USERNAME}` }]]
+        }
+      }
+    );
+    awaitingWritingPayment.add(userId);
+    return;
+  }
+
+  // ---- Admin tugmalari (Writing Checker uchun to'lov ruxsati) ----
+  if (query.data.startsWith('approve_writing:') || query.data.startsWith('reject_writing:')) {
+    if (String(chatId) !== String(ADMIN_CHAT_ID)) return;
+
+    const [action, reqId] = query.data.split(':');
+    const req = pendingWritingRequests[reqId];
+
+    if (!req) {
+      return bot.answerCallbackQuery(query.id, { text: 'Bu so\'rov eskirgan yoki topilmadi.' });
+    }
+
+    if (action === 'reject_writing') {
+      delete pendingWritingRequests[reqId];
+      await bot.editMessageReplyMarkup({ inline_keyboard: [] }, {
+        chat_id: chatId,
+        message_id: query.message.message_id,
+      });
+      await bot.sendMessage(ADMIN_CHAT_ID, '❌ Writing Checker so\'rovi rad etildi.');
+      bot.sendMessage(req.userChatId, 'Kechirasiz, to\'lovingiz tasdiqlanmadi. Iltimos, admin bilan bog\'laning.');
+      return bot.answerCallbackQuery(query.id);
+    }
+
+    if (action === 'approve_writing') {
+      delete pendingWritingRequests[reqId];
+      writingApproved.add(req.userChatId === undefined ? null : query.from.id); // fallback, quyida aniqroq belgilanadi
+      // req.userChatId talabaning shaxsiy chat ID'si — private chatda userId === chatId bo'ladi
+      writingApproved.add(req.userChatId);
+
+      await bot.editMessageReplyMarkup({ inline_keyboard: [] }, {
+        chat_id: chatId,
+        message_id: query.message.message_id,
+      });
+      await bot.sendMessage(ADMIN_CHAT_ID, `✅ Writing Checker uchun ruxsat berildi (${req.userName}).`);
+      bot.sendMessage(req.userChatId,
+        `✅ To'lovingiz tasdiqlandi!\n\nEndi Writing (Task 2) insho matningizni shu botga oddiy matn qilib yuboring.`
+      );
+      return bot.answerCallbackQuery(query.id, { text: 'Ruxsat berildi ✅' });
+    }
   }
 
   // ---- Admin tugmalari (premium berish/rad etish) ----
