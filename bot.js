@@ -17,6 +17,9 @@
        - Javoblar matn yoki ovozli xabar (ovoz avtomatik matnga o'giriladi — OpenAI Whisper)
        - To'liq mock (savol-javob) admin(sizga)ga yuboriladi, siz /javob <kod> orqali
          (yoki forward qilingan xabarga REPLY qilib) natija yuborasiz — 60 daqiqa ichida.
+   + 🌐 SAYTDAN KELGAN SPEAKING MOCK: /submit-speaking
+       - speaking-mock.html/js orqali saytda topshirilgan to'liq mock (matn + audio)
+         shu endpoint orqali qabul qilinadi va admin chatga yuboriladi.
    ============================================================ */
 
 const TelegramBot = require('node-telegram-bot-api');
@@ -24,6 +27,7 @@ const fetch = require('node-fetch');
 const http = require('http');
 const https = require('https');
 const FormData = require('form-data');
+const Busboy = require('busboy');
 
 const { PART1, PART2, PART3, PART2_TO_PART3 } = require('./speaking-data');
 
@@ -98,7 +102,7 @@ function trackUser(userId) {
   dailyActiveUsers.add(userId);
 }
 
-// ---- HTTP server (+ /submit-writing endpoint sayt uchun) ----
+// ---- HTTP server (+ /submit-writing va /submit-speaking endpointlari sayt uchun) ----
 const PORT = process.env.PORT || 3000;
 
 function readJsonBody(req) {
@@ -191,6 +195,111 @@ http.createServer(async (req, res) => {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ ok: false, message: 'Server xatosi.' }));
     }
+  }
+
+  // ============================================================
+  // 🌐 SAYTDAGI SPEAKING MOCK TEST — /submit-speaking
+  // speaking-mock.js dan FormData orqali keladi:
+  //   - "meta" fieldi (JSON matn): kod, part1/2/3 topiclar, contact, answers[]
+  //   - "audio_<index>_part<part>" fieldlari: har bir javobning audio fayli
+  // ============================================================
+  if (req.method === 'POST' && req.url === '/submit-speaking') {
+    try {
+      const busboy = Busboy({ headers: req.headers });
+      let meta = null;
+      const audioFiles = []; // { fieldname, buffer, filename }
+
+      busboy.on('field', (fieldname, val) => {
+        if (fieldname === 'meta') {
+          try { meta = JSON.parse(val); } catch (e) { meta = null; }
+        }
+      });
+
+      busboy.on('file', (fieldname, file, info) => {
+        const chunks = [];
+        file.on('data', (d) => chunks.push(d));
+        file.on('end', () => {
+          audioFiles.push({ fieldname, buffer: Buffer.concat(chunks), filename: info.filename });
+        });
+      });
+
+      busboy.on('finish', async () => {
+        try {
+          if (!meta || !Array.isArray(meta.answers) || meta.answers.length === 0) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ ok: false, message: "Meta yoki javoblar topilmadi." }));
+          }
+
+          const code = meta.code || generateResultCode();
+          submissions[code] = {
+            type: 'speaking',
+            source: 'site',
+            tier: null,
+            email: null,
+            studentName: null,
+            status: 'pending',
+            feedback: null,
+            band: null,
+            studentChatId: null,
+            contact: meta.contact || null,
+            createdAt: Date.now(),
+          };
+
+          const header =
+            `🗣️ Yangi Speaking Mock (🌐 SAYT orqali)\n\n` +
+            `🔑 Kod: ${code}\n` +
+            `PART 1: ${meta.part1Topic || '-'}\n` +
+            `PART 2: ${meta.part2Topic || '-'}\n` +
+            `PART 3: ${meta.part3Topic || '-'}` +
+            (meta.contact ? `\n📧 Kontakt: ${meta.contact}` : '');
+
+          await bot.sendMessage(ADMIN_CHAT_ID, header);
+
+          // Har bir savol-javobni tartib bilan yuborish (audio bilan birga)
+          const sortedAnswers = meta.answers.slice().sort((a, b) => a.index - b.index);
+
+          for (const ans of sortedAnswers) {
+            await bot.sendMessage(
+              ADMIN_CHAT_ID,
+              `PART ${ans.part} — ${ans.question}\n👤 Matn: ${ans.text || "(matn yo'q)"}${ans.durationSec ? `\n⏱ ${ans.durationSec}s` : ''}`
+            );
+
+            const match = audioFiles.find(f => f.fieldname === `audio_${ans.index}_part${ans.part}`);
+            if (match && match.buffer && match.buffer.length > 0) {
+              try {
+                await bot.sendVoice(ADMIN_CHAT_ID, match.buffer, {}, {
+                  filename: match.filename || `answer_${ans.index}.webm`,
+                  contentType: 'audio/webm',
+                });
+              } catch (e) {
+                console.error('sendVoice xato:', e.message);
+              }
+            }
+          }
+
+          const lastMsg = await bot.sendMessage(
+            ADMIN_CHAT_ID,
+            `👆 Baholash uchun YUQORIDAGI oxirgi xabarga REPLY qilib javob yozing.\n(Masalan: "Band: 6.5\\nIzoh: ...")\n\nYoki: /javob ${code} Band: 6.5\nIzoh: ...`
+          );
+          adminMsgToCode[lastMsg.message_id] = code;
+          submissions[code].adminMsgId = lastMsg.message_id;
+
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, code }));
+        } catch (innerErr) {
+          console.error('submit-speaking (finish) xato:', innerErr);
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, message: 'Server xatosi.' }));
+        }
+      });
+
+      req.pipe(busboy);
+    } catch (e) {
+      console.error('submit-speaking xato:', e);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, message: 'Server xatosi.' }));
+    }
+    return;
   }
 
   res.writeHead(200, { 'Content-Type': 'text/plain' });
