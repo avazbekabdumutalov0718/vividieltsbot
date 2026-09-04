@@ -272,7 +272,7 @@ let requestCounter = 1;
 const writingSubmissions = {};             // code -> { source, email, studentName, taskType, essayText, status, feedback, band, studentChatId, adminMsgId, createdAt }
 const adminMsgToCode = {};                 // admin xabar ID -> code
 const awaitingWritingPayment = new Set();  // userId lar: "Writing Checker" ni tanladi, to'lov chekini kutyapmiz
-const writingApproved = new Set();         // userId lar: to'lov tasdiqlandi, insho matnini kutyapmiz
+const writingApproved = new Set();         // userId lar (chat ID): to'lov tasdiqlandi, insho matnini kutyapmiz
 const pendingWritingRequests = {};         // reqId -> { userChatId, userName, username }
 let writingReqCounter = 1;
 
@@ -421,11 +421,11 @@ bot.on('message', async (msg) => {
   const text = msg.caption || msg.text || '';
 
   // ---- 1) To'lovi tasdiqlangan foydalanuvchi — bu xabar uning INSHOSI ----
-  if (writingApproved.has(userId)) {
+  if (writingApproved.has(chatId)) {
     if (!text || text.trim().length < 20) {
       return bot.sendMessage(chatId, 'Iltimos, Writing (insho) matningizni to\'liq matn shaklida yuboring (kamida bir necha jumla).');
     }
-    writingApproved.delete(userId);
+    writingApproved.delete(chatId);
 
     const code = generateResultCode();
     writingSubmissions[code] = {
@@ -707,8 +707,7 @@ To'lovdan keyin chekni va emailingizni yuboring.`,
 
     if (action === 'approve_writing') {
       delete pendingWritingRequests[reqId];
-      writingApproved.add(req.userChatId === undefined ? null : query.from.id); // fallback, quyida aniqroq belgilanadi
-      // req.userChatId talabaning shaxsiy chat ID'si — private chatda userId === chatId bo'ladi
+      // req.userChatId — talabaning shaxsiy chat ID'si (private chatda userId === chatId bo'ladi)
       writingApproved.add(req.userChatId);
 
       await bot.editMessageReplyMarkup({ inline_keyboard: [] }, {
