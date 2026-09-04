@@ -1,0 +1,17 @@
+{
+  "name": "vivid-ielts-bot",
+  "version": "2.0.0",
+  "description": "VIVID IELTS Telegram bot — Premium approval, Writing & Speaking Checker, stats",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "dependencies": {
+    "node-telegram-bot-api": "^0.66.0",
+    "node-fetch": "^2.7.0",
+    "form-data": "^4.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
