@@ -4,20 +4,28 @@
    + Narxlar va Admin tugmalari
    + CD TESTLAR va BOOKS (Telegram file_id orqali)
    + Keep-alive
+   + STATISTIKA: /stats — foydalanuvchilar soni (admin uchun)
    + ✍️ WRITING CHECKER:
        - Saytdagi Mock Test > Writing bo'limidan yuborilgan insholar — BEPUL
-         (sayt backend /submit-writing endpointiga POST qiladi, bot buni
-         adminga forward qiladi, natija /natija <kod> orqali olinadi)
-       - Botning o'zidan to'g'ridan-to'g'ri yuborilgan insholar — PULLIK
-         (narx: WRITING_PRICE, to'lov admin tomonidan tasdiqlanadi)
-       - Admin forward qilingan insho xabariga REPLY qilib baho/izoh yozadi,
-         bot buni avtomatik talabaga (yoki /natija orqali) yetkazadi.
+       - Botning o'zidan yuborilgan insholar — PULLIK (to'lov admin tomonidan tasdiqlanadi)
+   + 🗣️ SPEAKING CHECKER (YANGI, PULLIK):
+       - 3 tarif: Oddiy / Premium / Gold
+       - To'lov skrinshotini yuborish → admin tasdiqlaydi → mock avtomatik boshlanadi
+       - Part 1: random topic, 4 ta savol, har biriga 25 soniya
+       - Part 2: random cue-card, 2 daqiqa
+       - Part 3: Part 2 mavzusiga bog'liq 5-6 ta savol, har biriga 40-45 soniya
+       - Javoblar matn yoki ovozli xabar (ovoz avtomatik matnga o'giriladi — OpenAI Whisper)
+       - To'liq mock (savol-javob) admin(sizga)ga yuboriladi, siz /javob <kod> orqali
+         (yoki forward qilingan xabarga REPLY qilib) natija yuborasiz — 60 daqiqa ichida.
    ============================================================ */
 
 const TelegramBot = require('node-telegram-bot-api');
 const fetch = require('node-fetch');
 const http = require('http');
 const https = require('https');
+const FormData = require('form-data');
+
+const { PART1, PART2, PART3, PART2_TO_PART3 } = require('./speaking-data');
 
 // ---- Environment variables ----
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -31,8 +39,36 @@ const CHANNEL_INVITE_LINK = 'https://t.me/+0Wiqg6jiVGc4YTEy';
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'vividieltsadmin';
 const SITE_URL = process.env.SITE_URL || 'https://vividieltsmain.vercel.app/';
 
-// Botning o'zidan to'g'ridan-to'g'ri Writing tekshirtirish narxi
+// Writing (bot orqali to'g'ridan-to'g'ri) narxi
 const WRITING_PRICE_TEXT = process.env.WRITING_PRICE_TEXT || "12,000 so'm";
+
+// Speaking tariflari
+const SPEAKING_TIERS = {
+  basic: {
+    key: 'basic',
+    label: "🟢 Oddiy tarif",
+    price: "5,000 so'm",
+    priceValue: 5000,
+    desc: "Faqat mock natijasi (band ball)",
+  },
+  premium: {
+    key: 'premium',
+    label: "🔵 Premium tarif",
+    price: "10,000 so'm",
+    priceValue: 10000,
+    desc: "Natija + umumiy feedback + 7+ band uchun javoblar tahlili",
+  },
+  gold: {
+    key: 'gold',
+    label: "🟣 Gold tarif",
+    price: "15,000 so'm",
+    priceValue: 15000,
+    desc: "Premium + Topic Words + Grammar Structures + Topic Videos",
+  },
+};
+
+// Ovozli xabarlarni matnga o'girish uchun (ixtiyoriy, lekin tavsiya etiladi)
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 
 if (!BOT_TOKEN || !ADMIN_CHAT_ID || !SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
   console.error('Missing required environment variables.');
@@ -40,6 +76,27 @@ if (!BOT_TOKEN || !ADMIN_CHAT_ID || !SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY)
 }
 
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
+
+// ============================================================
+// STATISTIKA (foydalanuvchilar sonini kuzatish)
+// ============================================================
+const allUsersSeen = new Set();     // barcha vaqtdagi unique userId lar
+const dailyActiveUsers = new Set(); // shu kun ichida faol bo'lgan userId lar
+let statsDay = new Date().toDateString();
+let totalStartCount = 0;            // nechta marta /start bosilgan
+let totalPremiumApproved = 0;
+let totalWritingChecked = 0;
+let totalSpeakingChecked = 0;
+
+function trackUser(userId) {
+  const today = new Date().toDateString();
+  if (today !== statsDay) {
+    statsDay = today;
+    dailyActiveUsers.clear();
+  }
+  allUsersSeen.add(userId);
+  dailyActiveUsers.add(userId);
+}
 
 // ---- HTTP server (+ /submit-writing endpoint sayt uchun) ----
 const PORT = process.env.PORT || 3000;
@@ -66,7 +123,6 @@ function readJsonBody(req) {
 }
 
 http.createServer(async (req, res) => {
-  // CORS — sayt frontendidan (boshqa domendan) so'rov kelishi mumkin
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -90,16 +146,18 @@ http.createServer(async (req, res) => {
       }
 
       const code = generateResultCode();
-      writingSubmissions[code] = {
+      submissions[code] = {
+        type: 'writing',
         source: 'site',
         email: email || null,
         studentName: studentName || null,
         taskType,
         essayText,
+        tier: null,
         status: 'pending',
         feedback: null,
         band: null,
-        studentChatId: null, // sayt orqali kelgan insholarda chat yo'q, natija /natija orqali olinadi
+        studentChatId: null,
         createdAt: Date.now(),
       };
 
@@ -117,10 +175,9 @@ http.createServer(async (req, res) => {
       for (const chunk of chunks) {
         lastMsg = await bot.sendMessage(ADMIN_CHAT_ID, chunk);
       }
-      // Admin shu OXIRGI qismga REPLY qilsa, tizim uni shu kodga bog'laydi
       if (lastMsg) {
         adminMsgToCode[lastMsg.message_id] = code;
-        writingSubmissions[code].adminMsgId = lastMsg.message_id;
+        submissions[code].adminMsgId = lastMsg.message_id;
       }
       await bot.sendMessage(
         ADMIN_CHAT_ID,
@@ -250,6 +307,7 @@ function getMainKeyboard() {
       [{ text: '💰 Narxlar', callback_data: 'prices' }],
       [{ text: '📄 CD TESTLAR', callback_data: 'cd_tests' }, { text: '📚 BOOKS', callback_data: 'books' }],
       [{ text: '✍️ Writing Checker', callback_data: 'writing_checker' }],
+      [{ text: '🗣️ Speaking Checker', callback_data: 'speaking_checker' }],
       [{ text: '🌐 Sayt havolasi', url: SITE_URL }],
       [{ text: '👤 Admin bilan bog\'lanish', url: `https://t.me/${ADMIN_USERNAME}` }],
       [{ text: '📸 To\'lov chekini yuborish', callback_data: 'send_payment' }]
@@ -268,13 +326,29 @@ bot.on('chat_join_request', (msg) => {
 const pendingRequests = {};
 let requestCounter = 1;
 
-// ---- In-memory store (Writing Checker uchun) ----
-const writingSubmissions = {};             // code -> { source, email, studentName, taskType, essayText, status, feedback, band, studentChatId, adminMsgId, createdAt }
+// ---- In-memory store (Writing / Speaking Checker uchun, umumiy) ----
+// submissions[code] = {
+//   type: 'writing' | 'speaking',
+//   source: 'site' | 'bot',
+//   tier, email, studentName, taskType, essayText, transcript,
+//   status: 'pending' | 'reviewed',
+//   feedback, band, studentChatId, adminMsgId, createdAt
+// }
+const submissions = {};
 const adminMsgToCode = {};                 // admin xabar ID -> code
-const awaitingWritingPayment = new Set();  // userId lar: "Writing Checker" ni tanladi, to'lov chekini kutyapmiz
-const writingApproved = new Set();         // userId lar (chat ID): to'lov tasdiqlandi, insho matnini kutyapmiz
+
+// ---- Writing Checker holatlari ----
+const awaitingWritingPayment = new Set();  // userId lar: to'lov chekini kutyapmiz
+const writingApproved = new Set();         // chatId lar: to'lov tasdiqlandi, insho matnini kutyapmiz
 const pendingWritingRequests = {};         // reqId -> { userChatId, userName, username }
 let writingReqCounter = 1;
+
+// ---- Speaking Checker holatlari ----
+const awaitingSpeakingPayment = {};        // userId -> tierKey ('basic'|'premium'|'gold'): to'lov chekini kutyapmiz
+const speakingApprovedTier = {};           // chatId -> tierKey: to'lov tasdiqlandi, mock boshlashni kutyapmiz
+const pendingSpeakingRequests = {};        // reqId -> { userChatId, userName, username, tier }
+const speakingSessions = {};               // chatId -> session object (faol mock)
+let speakingReqCounter = 1;
 
 function generateResultCode() {
   return Math.floor(100000 + Math.random() * 900000).toString();
@@ -296,10 +370,67 @@ function extractEmail(text) {
   return match ? match[0] : null;
 }
 
+function shuffle(arr) {
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+function pickRandom(arr, n) {
+  return shuffle(arr).slice(0, Math.min(n, arr.length));
+}
+
+// ============================================================
+// OVOZNI MATNGA O'GIRISH (OpenAI Whisper)
+// ============================================================
+async function transcribeVoice(fileId) {
+  if (!OPENAI_API_KEY) {
+    return null; // sozlanmagan — matnga o'girib bo'lmaydi
+  }
+  try {
+    const fileLink = await bot.getFileLink(fileId);
+    const audioRes = await fetch(fileLink);
+    if (!audioRes.ok) throw new Error(`Audio yuklab olinmadi (${audioRes.status})`);
+    const audioBuffer = await audioRes.buffer();
+
+    const form = new FormData();
+    form.append('file', audioBuffer, { filename: 'voice.ogg', contentType: 'audio/ogg' });
+    form.append('model', 'whisper-1');
+
+    const resp = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        ...form.getHeaders(),
+      },
+      body: form,
+    });
+
+    if (!resp.ok) {
+      const errText = await resp.text();
+      throw new Error(`OpenAI xato (${resp.status}): ${errText}`);
+    }
+
+    const data = await resp.json();
+    return (data.text || '').trim() || null;
+  } catch (e) {
+    console.error('transcribeVoice xato:', e.message);
+    return null;
+  }
+}
+
 // ---- /start ----
 bot.onText(/\/start(?:\s+(.+))?/, async (msg) => {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
+
+  if (String(chatId) !== String(ADMIN_CHAT_ID)) {
+    trackUser(userId);
+    totalStartCount++;
+  }
 
   const subscribed = await isSubscribed(userId);
 
@@ -316,63 +447,72 @@ bot.onText(/\/start(?:\s+(.+))?/, async (msg) => {
   );
 });
 
-// ---- /natija <kod> — saytdan yuborilgan Writing natijasini olish ----
+// ---- /stats — faqat admin uchun ----
+bot.onText(/\/stats/, async (msg) => {
+  const chatId = msg.chat.id;
+  if (String(chatId) !== String(ADMIN_CHAT_ID)) return;
+
+  const activeSpeakingMocks = Object.keys(speakingSessions).length;
+  const pendingWritingCount = Object.values(submissions).filter(s => s.type === 'writing' && s.status === 'pending').length;
+  const pendingSpeakingCount = Object.values(submissions).filter(s => s.type === 'speaking' && s.status === 'pending').length;
+
+  bot.sendMessage(chatId,
+    `📊 *Bot statistikasi*\n\n` +
+    `👥 Jami unique foydalanuvchilar: *${allUsersSeen.size}*\n` +
+    `🟢 Bugun faol bo'lganlar: *${dailyActiveUsers.size}*\n` +
+    `🚀 Jami /start bosilgan: *${totalStartCount}*\n\n` +
+    `💎 Premium berilgan: *${totalPremiumApproved}*\n` +
+    `✍️ Tekshirilgan Writing (jami): *${totalWritingChecked}*\n` +
+    `🗣️ Tekshirilgan Speaking (jami): *${totalSpeakingChecked}*\n\n` +
+    `⏳ Javob kutayotgan Writing: *${pendingWritingCount}*\n` +
+    `⏳ Javob kutayotgan Speaking: *${pendingSpeakingCount}*\n` +
+    `🎙 Hozir faol Speaking mocklar: *${activeSpeakingMocks}*`,
+    { parse_mode: 'Markdown' }
+  );
+});
+
+// ---- /natija <kod> — saytdan yuborilgan Writing yoki Speaking natijasini olish ----
 bot.onText(/\/natija(?:\s+(.+))?/, async (msg, match) => {
   const chatId = msg.chat.id;
   const code = match && match[1] ? match[1].trim() : null;
 
   if (!code) {
     return bot.sendMessage(chatId,
-      `Natijangizni bilish uchun kodingiz bilan shu ko'rinishda yuboring:\n/natija 123456\n\n(Kodni saytda Writing testini yakunlagach olgansiz)`
+      `Natijangizni bilish uchun kodingiz bilan shu ko'rinishda yuboring:\n/natija 123456`
     );
   }
 
-  const sub = writingSubmissions[code];
+  const sub = submissions[code];
   if (!sub) {
     return bot.sendMessage(chatId, '❗ Bunday kod topilmadi. Kodni to\'g\'ri kiritganingizni tekshiring.');
   }
 
   if (sub.status !== 'reviewed') {
     return bot.sendMessage(chatId,
-      '⏳ Natijangiz hali tayyor emas. Javob odatda 12–24 soat ichida keladi. Birozdan keyin qayta urinib ko\'ring:\n/natija ' + code
+      '⏳ Natijangiz hali tayyor emas. Javob odatda 60 daqiqa (Writing uchun 12–24 soat) ichida keladi. Birozdan keyin qayta urinib ko\'ring:\n/natija ' + code
     );
   }
 
   bot.sendMessage(chatId,
-    `📝 Writing natijangiz (kod: ${code})\n\n` +
+    `📝 Natijangiz (kod: ${code})\n\n` +
     (sub.band ? `🎯 Band: ${sub.band}\n\n` : '') +
     `💬 Fikr-mulohaza:\n${sub.feedback}`
   );
 });
 
-// ---- ADMIN: hujjat yuborganda file_id'ni ko'rsatish ----
-bot.on('document', (msg) => {
-  const chatId = msg.chat.id;
-  if (String(chatId) !== String(ADMIN_CHAT_ID)) return; // faqat admindan qabul qilamiz
-
-  const fileId = msg.document.file_id;
-  const fileName = msg.document.file_name || 'nomsiz fayl';
-
-  bot.sendMessage(
-    chatId,
-    `📎 Fayl qabul qilindi: ${fileName}\n\nfile_id:\n${fileId}\n\nBuni CD_TEST_FILES yoki BOOK_FILES massiviga nusxalang.`
-  );
+// ---- ADMIN: /javob <kod> Baho: X Izoh: ... — natijani kod orqali yuborish ----
+bot.onText(/\/javob\s+(\S+)\s+([\s\S]+)/, async (msg, match) => {
+  if (String(msg.chat.id) !== String(ADMIN_CHAT_ID)) return;
+  const code = match[1].trim();
+  const feedbackText = match[2].trim();
+  await deliverFeedback(code, feedbackText);
 });
 
-// ---- ADMIN: forward qilingan Writing xabariga REPLY qilib baholash ----
-bot.on('message', async (msg) => {
-  if (String(msg.chat.id) !== String(ADMIN_CHAT_ID)) return;
-  if (!msg.reply_to_message) return;
-
-  const repliedId = msg.reply_to_message.message_id;
-  const code = adminMsgToCode[repliedId];
-  if (!code) return; // bu reply Writing xabariga tegishli emas
-
-  const sub = writingSubmissions[code];
-  if (!sub) return;
-
-  const feedbackText = msg.text || msg.caption || '';
-  if (!feedbackText.trim()) return;
+async function deliverFeedback(code, feedbackText) {
+  const sub = submissions[code];
+  if (!sub) {
+    return bot.sendMessage(ADMIN_CHAT_ID, `❗ "${code}" kodli topshiriq topilmadi.`);
+  }
 
   let band = null;
   const bandMatch = feedbackText.match(/band[:\s]+([0-9]+(\.[0-9])?)/i);
@@ -382,10 +522,13 @@ bot.on('message', async (msg) => {
   sub.band = band;
   sub.status = 'reviewed';
 
+  if (sub.type === 'writing') totalWritingChecked++;
+  if (sub.type === 'speaking') totalSpeakingChecked++;
+
   if (sub.source === 'bot' && sub.studentChatId) {
     try {
       await bot.sendMessage(sub.studentChatId,
-        `📝 Writing natijangiz tayyor!\n\n` +
+        `📝 ${sub.type === 'speaking' ? 'Speaking' : 'Writing'} natijangiz tayyor!\n\n` +
         (band ? `🎯 Band: ${band}\n\n` : '') +
         `💬 Fikr-mulohaza:\n${feedbackText}`
       );
@@ -398,7 +541,323 @@ bot.on('message', async (msg) => {
     `✅ Natija saqlandi${sub.source === 'bot' ? ' va talabaga yuborildi' : ''}.\n(Kod: ${code}${sub.email ? ', email: ' + sub.email : ''})` +
     (sub.source === 'site' ? '\n\nTalaba natijani /natija ' + code + ' orqali botdan oladi.' : '')
   );
+}
+
+// ---- ADMIN: hujjat yuborganda file_id'ni ko'rsatish ----
+bot.on('document', (msg) => {
+  const chatId = msg.chat.id;
+  if (String(chatId) !== String(ADMIN_CHAT_ID)) return;
+
+  const fileId = msg.document.file_id;
+  const fileName = msg.document.file_name || 'nomsiz fayl';
+
+  bot.sendMessage(
+    chatId,
+    `📎 Fayl qabul qilindi: ${fileName}\n\nfile_id:\n${fileId}\n\nBuni CD_TEST_FILES yoki BOOK_FILES massiviga nusxalang.`
+  );
 });
+
+// ---- ADMIN: forward qilingan Writing/Speaking xabariga REPLY qilib baholash ----
+bot.on('message', async (msg) => {
+  if (String(msg.chat.id) !== String(ADMIN_CHAT_ID)) return;
+  if (!msg.reply_to_message) return;
+
+  const repliedId = msg.reply_to_message.message_id;
+  const code = adminMsgToCode[repliedId];
+  if (!code) return;
+
+  const feedbackText = msg.text || msg.caption || '';
+  if (!feedbackText.trim()) return;
+
+  await deliverFeedback(code, feedbackText);
+});
+
+// ============================================================
+// SPEAKING MOCK — savol/timer logikasi
+// ============================================================
+
+function speakingKeyboardTiers() {
+  return {
+    inline_keyboard: [
+      [{ text: `${SPEAKING_TIERS.basic.label} — ${SPEAKING_TIERS.basic.price}`, callback_data: 'speaking_tier:basic' }],
+      [{ text: `${SPEAKING_TIERS.premium.label} — ${SPEAKING_TIERS.premium.price}`, callback_data: 'speaking_tier:premium' }],
+      [{ text: `${SPEAKING_TIERS.gold.label} — ${SPEAKING_TIERS.gold.price}`, callback_data: 'speaking_tier:gold' }],
+    ]
+  };
+}
+
+function clearSessionTimer(session) {
+  if (session && session.timeoutId) {
+    clearTimeout(session.timeoutId);
+    session.timeoutId = null;
+  }
+}
+
+async function endSession(chatId, notify = false) {
+  const session = speakingSessions[chatId];
+  if (!session) return;
+  clearSessionTimer(session);
+  delete speakingSessions[chatId];
+  if (notify) {
+    try { await bot.sendMessage(chatId, 'Mock sessiyasi tugatildi.'); } catch (e) {}
+  }
+}
+
+// Sessiyani boshlash: Part 1 dan
+async function startSpeakingMock(chatId, tier) {
+  const topic = PART1[Math.floor(Math.random() * PART1.length)];
+  const questions = pickRandom(topic.questions, Math.min(4, topic.questions.length));
+
+  const session = {
+    tier,
+    stage: 'part1',
+    part1: { topic: topic.topic, questions, index: 0, answers: [] },
+    part2: null,
+    part3: null,
+    timeoutId: null,
+    currentKey: null,
+    answered: false,
+    startedAt: Date.now(),
+  };
+  speakingSessions[chatId] = session;
+
+  await bot.sendMessage(chatId,
+    `🎙️ *Speaking Mock boshlandi!*\n\n` +
+    `*PART 1* — Mavzu: _${topic.topic}_\n\n` +
+    `Har bir savolga *25 soniya* ichida javob bering (matn yoki ovozli xabar).`,
+    { parse_mode: 'Markdown' }
+  );
+
+  await askPart1Question(chatId);
+}
+
+async function askPart1Question(chatId) {
+  const session = speakingSessions[chatId];
+  if (!session) return;
+  const { questions, index } = session.part1;
+
+  if (index >= questions.length) {
+    return startPart2(chatId);
+  }
+
+  const qText = questions[index];
+  const key = `p1-${index}-${Date.now()}`;
+  session.currentKey = key;
+  session.answered = false;
+
+  await bot.sendMessage(chatId, `🔹 Part 1 — Savol ${index + 1}/${questions.length}:\n\n${qText}\n\n⏱ 25 soniya`);
+
+  session.timeoutId = setTimeout(() => {
+    handlePart1Timeout(chatId, key);
+  }, 25 * 1000);
+}
+
+async function handlePart1Timeout(chatId, key) {
+  const session = speakingSessions[chatId];
+  if (!session || session.currentKey !== key || session.answered) return;
+  session.answered = true;
+  session.part1.answers.push({ question: session.part1.questions[session.part1.index], answer: '(vaqt tugadi, javob berilmadi)', viaVoice: false });
+  session.part1.index++;
+  try { await bot.sendMessage(chatId, '⏰ Vaqt tugadi! Keyingi savolga o\'tamiz...'); } catch (e) {}
+  askPart1Question(chatId);
+}
+
+async function startPart2(chatId) {
+  const session = speakingSessions[chatId];
+  if (!session) return;
+
+  const topic = PART2[Math.floor(Math.random() * PART2.length)];
+  session.stage = 'part2';
+  session.part2 = { topicId: topic.id, topic: topic.topic, cue: topic.cue, answer: null };
+  session.currentKey = `p2-${Date.now()}`;
+  session.answered = false;
+
+  await bot.sendMessage(chatId,
+    `🔸 *PART 2*\n\n${topic.cue}\n\n` +
+    `Javobingizni tayyorlab, *2 daqiqa* ichida gapirib bering yoki yozib yuboring.`,
+    { parse_mode: 'Markdown' }
+  );
+
+  session.timeoutId = setTimeout(() => {
+    handlePart2Timeout(chatId, session.currentKey);
+  }, 120 * 1000);
+}
+
+async function handlePart2Timeout(chatId, key) {
+  const session = speakingSessions[chatId];
+  if (!session || session.currentKey !== key || session.answered) return;
+  session.answered = true;
+  session.part2.answer = '(vaqt tugadi, javob berilmadi)';
+  session.part2.viaVoice = false;
+  try { await bot.sendMessage(chatId, '⏰ Vaqt tugadi! Endi Part 3 savollariga o\'tamiz...'); } catch (e) {}
+  startPart3(chatId);
+}
+
+async function startPart3(chatId) {
+  const session = speakingSessions[chatId];
+  if (!session) return;
+
+  const groupId = PART2_TO_PART3[session.part2.topicId];
+  const group = PART3.find(g => g.id === groupId) || PART3[0];
+  const count = Math.random() < 0.5 ? 5 : 6;
+  const questions = pickRandom(group.questions, Math.min(count, group.questions.length));
+
+  session.stage = 'part3';
+  session.part3 = { topic: group.topic, questions, index: 0, answers: [] };
+
+  await bot.sendMessage(chatId,
+    `🔹 *PART 3* — Mavzu: _${group.topic}_\n\nHar bir savolga *40-45 soniya* ichida javob bering.`,
+    { parse_mode: 'Markdown' }
+  );
+
+  await askPart3Question(chatId);
+}
+
+async function askPart3Question(chatId) {
+  const session = speakingSessions[chatId];
+  if (!session) return;
+  const { questions, index } = session.part3;
+
+  if (index >= questions.length) {
+    return finishSpeakingMock(chatId);
+  }
+
+  const qText = questions[index];
+  const seconds = 40 + Math.floor(Math.random() * 6); // 40-45
+  const key = `p3-${index}-${Date.now()}`;
+  session.currentKey = key;
+  session.answered = false;
+
+  await bot.sendMessage(chatId, `🔹 Part 3 — Savol ${index + 1}/${questions.length}:\n\n${qText}\n\n⏱ ${seconds} soniya`);
+
+  session.timeoutId = setTimeout(() => {
+    handlePart3Timeout(chatId, key);
+  }, seconds * 1000);
+}
+
+async function handlePart3Timeout(chatId, key) {
+  const session = speakingSessions[chatId];
+  if (!session || session.currentKey !== key || session.answered) return;
+  session.answered = true;
+  session.part3.answers.push({ question: session.part3.questions[session.part3.index], answer: '(vaqt tugadi, javob berilmadi)', viaVoice: false });
+  session.part3.index++;
+  try { await bot.sendMessage(chatId, '⏰ Vaqt tugadi! Keyingi savolga o\'tamiz...'); } catch (e) {}
+  askPart3Question(chatId);
+}
+
+// Foydalanuvchidan kelgan javobni (matn yoki ovoz) qabul qilish
+async function handleSpeakingAnswer(msg) {
+  const chatId = msg.chat.id;
+  const session = speakingSessions[chatId];
+  if (!session || session.answered) return false;
+
+  let answerText = msg.text || msg.caption || null;
+  let viaVoice = false;
+  let voiceFileId = null;
+
+  if (msg.voice) {
+    viaVoice = true;
+    voiceFileId = msg.voice.file_id;
+    await bot.sendChatAction(chatId, 'typing');
+    const transcript = await transcribeVoice(voiceFileId);
+    answerText = transcript || '(ovozli javob — matnga o\'girib bo\'lmadi, admin ovoz orqali eshitadi)';
+  }
+
+  if (!answerText) return false; // bu xabar javob emas (masalan, rasm)
+
+  clearSessionTimer(session);
+  session.answered = true;
+
+  if (session.stage === 'part1') {
+    session.part1.answers.push({ question: session.part1.questions[session.part1.index], answer: answerText, viaVoice, voiceFileId });
+    session.part1.index++;
+    askPart1Question(chatId);
+  } else if (session.stage === 'part2') {
+    session.part2.answer = answerText;
+    session.part2.viaVoice = viaVoice;
+    session.part2.voiceFileId = voiceFileId;
+    startPart3(chatId);
+  } else if (session.stage === 'part3') {
+    session.part3.answers.push({ question: session.part3.questions[session.part3.index], answer: answerText, viaVoice, voiceFileId });
+    session.part3.index++;
+    askPart3Question(chatId);
+  }
+
+  return true;
+}
+
+async function finishSpeakingMock(chatId) {
+  const session = speakingSessions[chatId];
+  if (!session) return;
+
+  const tierInfo = SPEAKING_TIERS[session.tier];
+  const code = generateResultCode();
+
+  const meRef = await bot.sendMessage(chatId,
+    `✅ *Mock yakunlandi!*\n\n` +
+    `Tarifingiz: ${tierInfo.label}\n` +
+    `Natijangiz odatda *60 daqiqa* ichida shu chatga keladi.\n` +
+    `Kodingiz (ixtiyoriy tekshirish uchun): \`${code}\``,
+    { parse_mode: 'Markdown' }
+  );
+
+  submissions[code] = {
+    type: 'speaking',
+    source: 'bot',
+    tier: session.tier,
+    email: null,
+    studentName: null,
+    status: 'pending',
+    feedback: null,
+    band: null,
+    studentChatId: chatId,
+    createdAt: Date.now(),
+  };
+
+  // Adminga to'liq transkriptni yuborish
+  const header =
+    `🗣️ Yangi Speaking Mock — ${tierInfo.label}\n\n` +
+    `🔑 Kod: ${code}\n\n` +
+    `PART 1 — ${session.part1.topic}`;
+  await bot.sendMessage(ADMIN_CHAT_ID, header);
+
+  for (const [i, qa] of session.part1.answers.entries()) {
+    await bot.sendMessage(ADMIN_CHAT_ID, `P1.${i + 1}) ${qa.question}\n👤 ${qa.answer}${qa.viaVoice ? ' 🎤' : ''}`);
+    if (qa.viaVoice && qa.voiceFileId) {
+      try { await bot.sendVoice(ADMIN_CHAT_ID, qa.voiceFileId); } catch (e) {}
+    }
+  }
+
+  await bot.sendMessage(ADMIN_CHAT_ID, `PART 2 — ${session.part2.topic}\n\n${session.part2.cue}\n\n👤 ${session.part2.answer}${session.part2.viaVoice ? ' 🎤' : ''}`);
+  if (session.part2.viaVoice && session.part2.voiceFileId) {
+    try { await bot.sendVoice(ADMIN_CHAT_ID, session.part2.voiceFileId); } catch (e) {}
+  }
+
+  await bot.sendMessage(ADMIN_CHAT_ID, `PART 3 — ${session.part3.topic}`);
+  for (const [i, qa] of session.part3.answers.entries()) {
+    await bot.sendMessage(ADMIN_CHAT_ID, `P3.${i + 1}) ${qa.question}\n👤 ${qa.answer}${qa.viaVoice ? ' 🎤' : ''}`);
+    if (qa.viaVoice && qa.voiceFileId) {
+      try { await bot.sendVoice(ADMIN_CHAT_ID, qa.voiceFileId); } catch (e) {}
+    }
+  }
+
+  let feedbackGuide;
+  if (session.tier === 'gold') {
+    feedbackGuide = 'Gold tarif: Band + umumiy feedback + 7+ javoblar tahlili + Topic Words + Grammar Structures + Topic Videos havolasini yozing.';
+  } else if (session.tier === 'premium') {
+    feedbackGuide = 'Premium tarif: Band + umumiy feedback + 7+ band uchun javoblar tahlilini yozing.';
+  } else {
+    feedbackGuide = 'Oddiy tarif: faqat Band ballni yozing.';
+  }
+
+  const lastMsg = await bot.sendMessage(ADMIN_CHAT_ID,
+    `👆 Baholash uchun shu xabarga REPLY qilib javob yozing (yoki /javob ${code} Band: 6.5\\nIzoh: ...).\n\n📌 ${feedbackGuide}`
+  );
+  adminMsgToCode[lastMsg.message_id] = code;
+  submissions[code].adminMsgId = lastMsg.message_id;
+
+  delete speakingSessions[chatId];
+}
 
 // ---- Oddiy xabarlar ----
 bot.on('message', async (msg) => {
@@ -410,6 +869,8 @@ bot.on('message', async (msg) => {
   if (msg.text && msg.text.startsWith('/natija')) return;
   if (msg.document) return; // hujjatlar yuqorida alohida ishlanadi
 
+  trackUser(userId);
+
   const subscribed = await isSubscribed(userId);
   if (!subscribed) {
     return bot.sendMessage(chatId,
@@ -420,7 +881,14 @@ bot.on('message', async (msg) => {
 
   const text = msg.caption || msg.text || '';
 
-  // ---- 1) To'lovi tasdiqlangan foydalanuvchi — bu xabar uning INSHOSI ----
+  // ---- 0) Faol Speaking mock bo'lsa — bu xabar javob ----
+  if (speakingSessions[chatId]) {
+    const handled = await handleSpeakingAnswer(msg);
+    if (handled) return;
+    return bot.sendMessage(chatId, 'Iltimos, savolga matn yoki ovozli xabar orqali javob bering.');
+  }
+
+  // ---- 1) To'lovi tasdiqlangan foydalanuvchi (Writing) — bu xabar uning INSHOSI ----
   if (writingApproved.has(chatId)) {
     if (!text || text.trim().length < 20) {
       return bot.sendMessage(chatId, 'Iltimos, Writing (insho) matningizni to\'liq matn shaklida yuboring (kamida bir necha jumla).');
@@ -428,8 +896,10 @@ bot.on('message', async (msg) => {
     writingApproved.delete(chatId);
 
     const code = generateResultCode();
-    writingSubmissions[code] = {
+    submissions[code] = {
+      type: 'writing',
       source: 'bot',
+      tier: null,
       email: null,
       studentName: [msg.from.first_name, msg.from.last_name].filter(Boolean).join(' '),
       taskType: 'Task 2',
@@ -444,7 +914,7 @@ bot.on('message', async (msg) => {
     const header =
       `✍️ Yangi Writing (🤖 BOT orqali — PULLIK, tasdiqlangan)\n\n` +
       `🔑 Kod: ${code}\n` +
-      `👤 Ism: ${writingSubmissions[code].studentName}\n` +
+      `👤 Ism: ${submissions[code].studentName}\n` +
       `🔗 Username: ${msg.from.username ? '@' + msg.from.username : '(yo\'q)'}\n\n` +
       `— Insho matni quyida —`;
 
@@ -456,7 +926,7 @@ bot.on('message', async (msg) => {
     }
     if (lastMsg) {
       adminMsgToCode[lastMsg.message_id] = code;
-      writingSubmissions[code].adminMsgId = lastMsg.message_id;
+      submissions[code].adminMsgId = lastMsg.message_id;
     }
     await bot.sendMessage(
       ADMIN_CHAT_ID,
@@ -501,7 +971,44 @@ bot.on('message', async (msg) => {
     return bot.sendMessage(chatId, 'Rahmat! To\'lov cheki adminga yuborildi, tasdiqlangach insho yuborishingiz mumkin bo\'ladi ⏳');
   }
 
-  // ---- 3) Aks holda — bu PREMIUM uchun to'lov da'vosi (avvalgi flow) ----
+  // ---- 3) Speaking Checker uchun to'lov kutilayotgan foydalanuvchi — bu xabar TO'LOV CHEKI ----
+  if (awaitingSpeakingPayment[userId]) {
+    const tierKey = awaitingSpeakingPayment[userId];
+    delete awaitingSpeakingPayment[userId];
+    const tierInfo = SPEAKING_TIERS[tierKey];
+
+    const reqId = 's' + String(speakingReqCounter++);
+    pendingSpeakingRequests[reqId] = {
+      userChatId: chatId,
+      userName: [msg.from.first_name, msg.from.last_name].filter(Boolean).join(' '),
+      username: msg.from.username ? '@' + msg.from.username : '(username yo\'q)',
+      tier: tierKey,
+    };
+
+    try {
+      await bot.forwardMessage(ADMIN_CHAT_ID, chatId, msg.message_id);
+    } catch (e) {}
+
+    await bot.sendMessage(ADMIN_CHAT_ID,
+      `🗣️ Speaking Checker — to'lov da'vosi\n\n` +
+      `👤 Ism: ${pendingSpeakingRequests[reqId].userName}\n` +
+      `🔗 Username: ${pendingSpeakingRequests[reqId].username}\n` +
+      `💎 Tarif: ${tierInfo.label}\n` +
+      `💵 Narx: ${tierInfo.price}`,
+      {
+        reply_markup: {
+          inline_keyboard: [[
+            { text: '✅ Ruxsat berish', callback_data: `approve_speaking:${reqId}` },
+            { text: '❌ Rad etish', callback_data: `reject_speaking:${reqId}` },
+          ]]
+        }
+      }
+    );
+
+    return bot.sendMessage(chatId, 'Rahmat! To\'lov cheki adminga yuborildi, tasdiqlangach Speaking mock avtomatik boshlanadi ⏳');
+  }
+
+  // ---- 4) Aks holda — bu PREMIUM uchun to'lov da'vosi ----
   const email = extractEmail(text);
 
   const reqId = String(requestCounter++);
@@ -593,6 +1100,13 @@ bot.on('callback_query', async (query) => {
 • Full Speaking mock test
 • 3 full IELTS mock exams
 
+✍️ *Writing Checker (bot orqali)* — ${WRITING_PRICE_TEXT}
+
+🗣️ *Speaking Checker (bot orqali):*
+• ${SPEAKING_TIERS.basic.label} — ${SPEAKING_TIERS.basic.price} (${SPEAKING_TIERS.basic.desc})
+• ${SPEAKING_TIERS.premium.label} — ${SPEAKING_TIERS.premium.price} (${SPEAKING_TIERS.premium.desc})
+• ${SPEAKING_TIERS.gold.label} — ${SPEAKING_TIERS.gold.price} (${SPEAKING_TIERS.gold.desc})
+
 To'lovdan keyin chekni va emailingizni yuboring.`,
       { parse_mode: 'Markdown', reply_markup: getMainKeyboard() }
     );
@@ -683,6 +1197,58 @@ To'lovdan keyin chekni va emailingizni yuboring.`,
     return;
   }
 
+  // 9. Speaking Checker menyusi — tarif tanlash
+  if (query.data === 'speaking_checker') {
+    await bot.answerCallbackQuery(query.id);
+    await bot.sendMessage(chatId,
+      `🗣️ *Speaking Checker*\n\n` +
+      `To'liq IELTS Speaking mock (Part 1 + Part 2 + Part 3) — savollar tasodifiy tanlanadi, javoblaringizni matn yoki ovozli xabar orqali yuborasiz.\n\n` +
+      `Tarifni tanlang:\n\n` +
+      `${SPEAKING_TIERS.basic.label} — ${SPEAKING_TIERS.basic.price}\n${SPEAKING_TIERS.basic.desc}\n\n` +
+      `${SPEAKING_TIERS.premium.label} — ${SPEAKING_TIERS.premium.price}\n${SPEAKING_TIERS.premium.desc}\n\n` +
+      `${SPEAKING_TIERS.gold.label} — ${SPEAKING_TIERS.gold.price}\n${SPEAKING_TIERS.gold.desc}`,
+      { parse_mode: 'Markdown', reply_markup: speakingKeyboardTiers() }
+    );
+    return;
+  }
+
+  // 10. Speaking tarif tanlandi -> to'lov so'rash
+  if (query.data.startsWith('speaking_tier:')) {
+    const tierKey = query.data.split(':')[1];
+    const tierInfo = SPEAKING_TIERS[tierKey];
+    if (!tierInfo) return bot.answerCallbackQuery(query.id);
+
+    await bot.answerCallbackQuery(query.id);
+    awaitingSpeakingPayment[userId] = tierKey;
+
+    await bot.sendMessage(chatId,
+      `💳 Siz *${tierInfo.label}* ni tanladingiz — *${tierInfo.price}*.\n\n` +
+      `To'lovni amalga oshirib, chekni (screenshot) shu yerga yuboring. Admin tasdiqlagach, Speaking mock avtomatik boshlanadi.`,
+      {
+        parse_mode: 'Markdown',
+        reply_markup: {
+          inline_keyboard: [[{ text: '👤 Admin bilan bog\'lanish', url: `https://t.me/${ADMIN_USERNAME}` }]]
+        }
+      }
+    );
+    return;
+  }
+
+  // 11. Mockni boshlash tugmasi (admin tasdiqlagandan keyin)
+  if (query.data === 'start_speaking_mock') {
+    await bot.answerCallbackQuery(query.id);
+    const tierKey = speakingApprovedTier[chatId];
+    if (!tierKey) {
+      return bot.sendMessage(chatId, 'Ruxsat topilmadi. Iltimos, avval to\'lovni tasdiqlatib oling.');
+    }
+    if (speakingSessions[chatId]) {
+      return bot.sendMessage(chatId, 'Sizda allaqachon faol mock bor. Uni yakunlang.');
+    }
+    delete speakingApprovedTier[chatId];
+    await startSpeakingMock(chatId, tierKey);
+    return;
+  }
+
   // ---- Admin tugmalari (Writing Checker uchun to'lov ruxsati) ----
   if (query.data.startsWith('approve_writing:') || query.data.startsWith('reject_writing:')) {
     if (String(chatId) !== String(ADMIN_CHAT_ID)) return;
@@ -707,7 +1273,6 @@ To'lovdan keyin chekni va emailingizni yuboring.`,
 
     if (action === 'approve_writing') {
       delete pendingWritingRequests[reqId];
-      // req.userChatId — talabaning shaxsiy chat ID'si (private chatda userId === chatId bo'ladi)
       writingApproved.add(req.userChatId);
 
       await bot.editMessageReplyMarkup({ inline_keyboard: [] }, {
@@ -717,6 +1282,45 @@ To'lovdan keyin chekni va emailingizni yuboring.`,
       await bot.sendMessage(ADMIN_CHAT_ID, `✅ Writing Checker uchun ruxsat berildi (${req.userName}).`);
       bot.sendMessage(req.userChatId,
         `✅ To'lovingiz tasdiqlandi!\n\nEndi Writing (Task 2) insho matningizni shu botga oddiy matn qilib yuboring.`
+      );
+      return bot.answerCallbackQuery(query.id, { text: 'Ruxsat berildi ✅' });
+    }
+  }
+
+  // ---- Admin tugmalari (Speaking Checker uchun to'lov ruxsati) ----
+  if (query.data.startsWith('approve_speaking:') || query.data.startsWith('reject_speaking:')) {
+    if (String(chatId) !== String(ADMIN_CHAT_ID)) return;
+
+    const [action, reqId] = query.data.split(':');
+    const req = pendingSpeakingRequests[reqId];
+
+    if (!req) {
+      return bot.answerCallbackQuery(query.id, { text: 'Bu so\'rov eskirgan yoki topilmadi.' });
+    }
+
+    if (action === 'reject_speaking') {
+      delete pendingSpeakingRequests[reqId];
+      await bot.editMessageReplyMarkup({ inline_keyboard: [] }, {
+        chat_id: chatId,
+        message_id: query.message.message_id,
+      });
+      await bot.sendMessage(ADMIN_CHAT_ID, '❌ Speaking Checker so\'rovi rad etildi.');
+      bot.sendMessage(req.userChatId, 'Kechirasiz, to\'lovingiz tasdiqlanmadi. Iltimos, admin bilan bog\'laning.');
+      return bot.answerCallbackQuery(query.id);
+    }
+
+    if (action === 'approve_speaking') {
+      delete pendingSpeakingRequests[reqId];
+      speakingApprovedTier[req.userChatId] = req.tier;
+
+      await bot.editMessageReplyMarkup({ inline_keyboard: [] }, {
+        chat_id: chatId,
+        message_id: query.message.message_id,
+      });
+      await bot.sendMessage(ADMIN_CHAT_ID, `✅ Speaking Checker uchun ruxsat berildi (${req.userName}, ${SPEAKING_TIERS[req.tier].label}).`);
+      bot.sendMessage(req.userChatId,
+        `✅ To'lovingiz tasdiqlandi! (${SPEAKING_TIERS[req.tier].label})\n\nMockni boshlash uchun tugmani bosing 👇`,
+        { reply_markup: { inline_keyboard: [[{ text: '🎙 Mockni boshlash', callback_data: 'start_speaking_mock' }]] } }
       );
       return bot.answerCallbackQuery(query.id, { text: 'Ruxsat berildi ✅' });
     }
@@ -759,6 +1363,7 @@ To'lovdan keyin chekni va emailingizni yuboring.`,
       }
 
       delete pendingRequests[reqId];
+      totalPremiumApproved++;
       await bot.editMessageReplyMarkup({ inline_keyboard: [] }, {
         chat_id: chatId,
         message_id: query.message.message_id,
