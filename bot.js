@@ -20,6 +20,10 @@
    + 🌐 SAYTDAN KELGAN SPEAKING MOCK: /submit-speaking
        - speaking-mock.html/js orqali saytda topshirilgan to'liq mock (matn + audio)
          shu endpoint orqali qabul qilinadi va admin chatga yuboriladi.
+   + 🔐 SAYTGA KIRISH KODI: /login
+       - Foydalanuvchi botga /login yuboradi, bot 6 xonali kod generatsiya qilib
+         Supabase'ga yozadi va foydalanuvchiga yuboradi. Kod 5 daqiqa amal qiladi.
+         Saytdagi Edge Function (telegram-code-login) shu kodni tekshirib kirgizadi.
    ============================================================ */
 
 const TelegramBot = require('node-telegram-bot-api');
@@ -41,7 +45,7 @@ const PREMIUM_DAYS = parseInt(process.env.PREMIUM_DAYS || '30', 10);
 const REQUIRED_CHANNEL = process.env.REQUIRED_CHANNEL || '-1004304384442';
 const CHANNEL_INVITE_LINK = 'https://t.me/+0Wiqg6jiVGc4YTEy';
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'vividieltsadmin';
-const SITE_URL = process.env.SITE_URL || 'https://vividieltsmain.vercel.app/';
+const SITE_URL = process.env.SITE_URL || 'https://vividielt-ss.vercel.app/';
 
 // Writing (bot orqali to'g'ridan-to'g'ri) narxi
 const WRITING_PRICE_TEXT = process.env.WRITING_PRICE_TEXT || "12,000 so'm";
@@ -100,6 +104,49 @@ function trackUser(userId) {
   }
   allUsersSeen.add(userId);
   dailyActiveUsers.add(userId);
+}
+
+// ============================================================
+// 🔐 SAYTGA KIRISH KODI (/login)
+// ============================================================
+function generateLoginCode() {
+  return Math.floor(100000 + Math.random() * 900000).toString();
+}
+
+async function issueLoginCode(chatId, userId, fullName) {
+  const code = generateLoginCode();
+  const expiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
+
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/telegram_login_codes`, {
+    method: 'POST',
+    headers: {
+      apikey: SUPABASE_SERVICE_ROLE_KEY,
+      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+      'Content-Type': 'application/json',
+      Prefer: 'return=minimal',
+    },
+    body: JSON.stringify({
+      code,
+      telegram_id: userId,
+      full_name: fullName,
+      expires_at: expiresAt,
+      used: false,
+    }),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    console.error('issueLoginCode xato:', errText);
+    return bot.sendMessage(chatId, "⚠️ Kod yaratishda xatolik yuz berdi. Birozdan keyin qayta urinib ko'ring.");
+  }
+
+  await bot.sendMessage(
+    chatId,
+    `🔐 Saytga kirish kodingiz:\n\n*${code}*\n\n` +
+    `Bu kodni saytdagi "Telegram" tugmasi ostidagi maydonga kiriting.\n` +
+    `⏳ Kod *5 daqiqa* amal qiladi va faqat bir marta ishlatiladi.`,
+    { parse_mode: 'Markdown' }
+  );
 }
 
 // ---- HTTP server (+ /submit-writing va /submit-speaking endpointlari sayt uchun) ----
@@ -413,6 +460,7 @@ function getSubscribeKeyboard() {
 function getMainKeyboard() {
   return {
     inline_keyboard: [
+      [{ text: '🔐 Saytga kirish kodi', callback_data: 'get_login_code' }],
       [{ text: '💰 Narxlar', callback_data: 'prices' }],
       [{ text: '📄 CD TESTLAR', callback_data: 'cd_tests' }, { text: '📚 BOOKS', callback_data: 'books' }],
       [{ text: '✍️ Writing Checker', callback_data: 'writing_checker' }],
@@ -554,6 +602,24 @@ bot.onText(/\/start(?:\s+(.+))?/, async (msg) => {
     `Salom! 👋\n\nVIVID IELTS Premium botiga xush kelibsiz!\n\nQuyidagi tugmalardan birini tanlang:`,
     { reply_markup: getMainKeyboard() }
   );
+});
+
+// ---- /login — saytga kirish kodi ----
+bot.onText(/\/login/, async (msg) => {
+  const chatId = msg.chat.id;
+  const userId = msg.from.id;
+  if (String(chatId) === String(ADMIN_CHAT_ID)) return;
+
+  const subscribed = await isSubscribed(userId);
+  if (!subscribed) {
+    return bot.sendMessage(chatId,
+      `⚠️ Avval kanalga obuna bo'ling:`,
+      { reply_markup: getSubscribeKeyboard() }
+    );
+  }
+
+  const fullName = [msg.from.first_name, msg.from.last_name].filter(Boolean).join(' ');
+  await issueLoginCode(chatId, userId, fullName);
 });
 
 // ---- /stats — faqat admin uchun ----
@@ -976,6 +1042,7 @@ bot.on('message', async (msg) => {
   if (String(chatId) === String(ADMIN_CHAT_ID)) return;
   if (msg.text && msg.text.startsWith('/start')) return;
   if (msg.text && msg.text.startsWith('/natija')) return;
+  if (msg.text && msg.text.startsWith('/login')) return;
   if (msg.document) return; // hujjatlar yuqorida alohida ishlanadi
 
   trackUser(userId);
@@ -1166,6 +1233,14 @@ function buildFileListKeyboard(files, prefix) {
 bot.on('callback_query', async (query) => {
   const chatId = query.message.chat.id;
   const userId = query.from.id;
+
+  // 0. Saytga kirish kodi
+  if (query.data === 'get_login_code') {
+    await bot.answerCallbackQuery(query.id);
+    const fullName = [query.from.first_name, query.from.last_name].filter(Boolean).join(' ');
+    await issueLoginCode(chatId, userId, fullName);
+    return;
+  }
 
   // 1. So'rov yubordim tugmasi
   if (query.data === 'check_sub') {
