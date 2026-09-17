@@ -8,22 +8,20 @@
    + ✍️ WRITING CHECKER:
        - Saytdagi Mock Test > Writing bo'limidan yuborilgan insholar — BEPUL
        - Botning o'zidan yuborilgan insholar — PULLIK (to'lov admin tomonidan tasdiqlanadi)
-   + 🗣️ SPEAKING CHECKER (YANGI, PULLIK):
+   + 🗣️ SPEAKING CHECKER (PULLIK):
        - 3 tarif: Oddiy / Premium / Gold
        - To'lov skrinshotini yuborish → admin tasdiqlaydi → mock avtomatik boshlanadi
-       - Part 1: random topic, 4 ta savol, har biriga 25 soniya
-       - Part 2: random cue-card, 2 daqiqa
-       - Part 3: Part 2 mavzusiga bog'liq 5-6 ta savol, har biriga 40-45 soniya
+       - Part 1: random topic, 4 ta savol — javob kelguncha kutiladi (fixed vaqt yo'q)
+       - Part 2: random cue-card — javob kelguncha kutiladi
+       - Part 3: Part 2 mavzusiga bog'liq 5-6 ta savol — javob kelguncha kutiladi
+       - Agar 2 daqiqa davomida javob kelmasa — "Davom etish / Tugatish" tugmalari chiqadi
        - Javoblar matn yoki ovozli xabar (ovoz avtomatik matnga o'giriladi — OpenAI Whisper)
-       - To'liq mock (savol-javob) admin(sizga)ga yuboriladi, siz /javob <kod> orqali
-         (yoki forward qilingan xabarga REPLY qilib) natija yuborasiz — 60 daqiqa ichida.
+       - To'liq mock (savol-javob, shu jumladan ovozli javoblarning matn transkripti) admin(sizga)ga
+         yuboriladi, siz /javob <kod> orqali (yoki forward qilingan xabarga REPLY qilib) natija
+         yuborasiz — 60 daqiqa ichida.
    + 🌐 SAYTDAN KELGAN SPEAKING MOCK: /submit-speaking
        - speaking-mock.html/js orqali saytda topshirilgan to'liq mock (matn + audio)
          shu endpoint orqali qabul qilinadi va admin chatga yuboriladi.
-   + 🔐 SAYTGA KIRISH KODI: /login
-       - Foydalanuvchi botga /login yuboradi, bot 6 xonali kod generatsiya qilib
-         Supabase'ga yozadi va foydalanuvchiga yuboradi. Kod 5 daqiqa amal qiladi.
-         Saytdagi Edge Function (telegram-code-login) shu kodni tekshirib kirgizadi.
    ============================================================ */
 
 const TelegramBot = require('node-telegram-bot-api');
@@ -104,49 +102,6 @@ function trackUser(userId) {
   }
   allUsersSeen.add(userId);
   dailyActiveUsers.add(userId);
-}
-
-// ============================================================
-// 🔐 SAYTGA KIRISH KODI (/login)
-// ============================================================
-function generateLoginCode() {
-  return Math.floor(100000 + Math.random() * 900000).toString();
-}
-
-async function issueLoginCode(chatId, userId, fullName) {
-  const code = generateLoginCode();
-  const expiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
-
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/telegram_login_codes`, {
-    method: 'POST',
-    headers: {
-      apikey: SUPABASE_SERVICE_ROLE_KEY,
-      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
-      'Content-Type': 'application/json',
-      Prefer: 'return=minimal',
-    },
-    body: JSON.stringify({
-      code,
-      telegram_id: userId,
-      full_name: fullName,
-      expires_at: expiresAt,
-      used: false,
-    }),
-  });
-
-  if (!res.ok) {
-    const errText = await res.text();
-    console.error('issueLoginCode xato:', errText);
-    return bot.sendMessage(chatId, "⚠️ Kod yaratishda xatolik yuz berdi. Birozdan keyin qayta urinib ko'ring.");
-  }
-
-  await bot.sendMessage(
-    chatId,
-    `🔐 Saytga kirish kodingiz:\n\n*${code}*\n\n` +
-    `Bu kodni saytdagi "Telegram" tugmasi ostidagi maydonga kiriting.\n` +
-    `⏳ Kod *5 daqiqa* amal qiladi va faqat bir marta ishlatiladi.`,
-    { parse_mode: 'Markdown' }
-  );
 }
 
 // ---- HTTP server (+ /submit-writing va /submit-speaking endpointlari sayt uchun) ----
@@ -460,7 +415,6 @@ function getSubscribeKeyboard() {
 function getMainKeyboard() {
   return {
     inline_keyboard: [
-      [{ text: '🔐 Saytga kirish kodi', callback_data: 'get_login_code' }],
       [{ text: '💰 Narxlar', callback_data: 'prices' }],
       [{ text: '📄 CD TESTLAR', callback_data: 'cd_tests' }, { text: '📚 BOOKS', callback_data: 'books' }],
       [{ text: '✍️ Writing Checker', callback_data: 'writing_checker' }],
@@ -604,24 +558,6 @@ bot.onText(/\/start(?:\s+(.+))?/, async (msg) => {
   );
 });
 
-// ---- /login — saytga kirish kodi ----
-bot.onText(/\/login/, async (msg) => {
-  const chatId = msg.chat.id;
-  const userId = msg.from.id;
-  if (String(chatId) === String(ADMIN_CHAT_ID)) return;
-
-  const subscribed = await isSubscribed(userId);
-  if (!subscribed) {
-    return bot.sendMessage(chatId,
-      `⚠️ Avval kanalga obuna bo'ling:`,
-      { reply_markup: getSubscribeKeyboard() }
-    );
-  }
-
-  const fullName = [msg.from.first_name, msg.from.last_name].filter(Boolean).join(' ');
-  await issueLoginCode(chatId, userId, fullName);
-});
-
 // ---- /stats — faqat admin uchun ----
 bot.onText(/\/stats/, async (msg) => {
   const chatId = msg.chat.id;
@@ -751,6 +687,8 @@ bot.on('message', async (msg) => {
 // SPEAKING MOCK — savol/timer logikasi
 // ============================================================
 
+const INACTIVITY_MS = 2 * 60 * 1000; // 2 daqiqa javob kelmasa — davom et/tugat so'raladi
+
 function speakingKeyboardTiers() {
   return {
     inline_keyboard: [
@@ -766,6 +704,36 @@ function clearSessionTimer(session) {
     clearTimeout(session.timeoutId);
     session.timeoutId = null;
   }
+}
+
+// Javobsiz 2 daqiqadan keyin ishga tushadigan inaktivlik taymeri.
+// Fixed 25/40/120 soniyalik javob vaqti YO'Q — savol javob kelguncha kutiladi.
+function startInactivityTimer(chatId) {
+  const session = speakingSessions[chatId];
+  if (!session) return;
+  clearSessionTimer(session);
+  session.timeoutId = setTimeout(() => {
+    handleInactivity(chatId);
+  }, INACTIVITY_MS);
+}
+
+async function handleInactivity(chatId) {
+  const session = speakingSessions[chatId];
+  if (!session) return;
+  session.timeoutId = null;
+  try {
+    await bot.sendMessage(chatId,
+      '⏰ 2 daqiqadan beri javob kelmadi.\n\nDavom etasizmi yoki mockni shu yerda tugatasizmi?',
+      {
+        reply_markup: {
+          inline_keyboard: [[
+            { text: '▶️ Davom etish', callback_data: 'speaking_continue' },
+            { text: '⏹ Tugatish', callback_data: 'speaking_finish' },
+          ]]
+        }
+      }
+    );
+  } catch (e) {}
 }
 
 async function endSession(chatId, notify = false) {
@@ -790,8 +758,6 @@ async function startSpeakingMock(chatId, tier) {
     part2: null,
     part3: null,
     timeoutId: null,
-    currentKey: null,
-    answered: false,
     startedAt: Date.now(),
   };
   speakingSessions[chatId] = session;
@@ -799,7 +765,7 @@ async function startSpeakingMock(chatId, tier) {
   await bot.sendMessage(chatId,
     `🎙️ *Speaking Mock boshlandi!*\n\n` +
     `*PART 1* — Mavzu: _${topic.topic}_\n\n` +
-    `Har bir savolga *25 soniya* ichida javob bering (matn yoki ovozli xabar).`,
+    `Har bir savolga matn yoki ovozli xabar orqali javob bering. Javobingizni yuborishingiz bilan keyingi savol beriladi.`,
     { parse_mode: 'Markdown' }
   );
 
@@ -816,25 +782,9 @@ async function askPart1Question(chatId) {
   }
 
   const qText = questions[index];
-  const key = `p1-${index}-${Date.now()}`;
-  session.currentKey = key;
-  session.answered = false;
 
-  await bot.sendMessage(chatId, `🔹 Part 1 — Savol ${index + 1}/${questions.length}:\n\n${qText}\n\n⏱ 25 soniya`);
-
-  session.timeoutId = setTimeout(() => {
-    handlePart1Timeout(chatId, key);
-  }, 25 * 1000);
-}
-
-async function handlePart1Timeout(chatId, key) {
-  const session = speakingSessions[chatId];
-  if (!session || session.currentKey !== key || session.answered) return;
-  session.answered = true;
-  session.part1.answers.push({ question: session.part1.questions[session.part1.index], answer: '(vaqt tugadi, javob berilmadi)', viaVoice: false });
-  session.part1.index++;
-  try { await bot.sendMessage(chatId, '⏰ Vaqt tugadi! Keyingi savolga o\'tamiz...'); } catch (e) {}
-  askPart1Question(chatId);
+  await bot.sendMessage(chatId, `🔹 Part 1 — Savol ${index + 1}/${questions.length}:\n\n${qText}`);
+  startInactivityTimer(chatId);
 }
 
 async function startPart2(chatId) {
@@ -844,28 +794,13 @@ async function startPart2(chatId) {
   const topic = PART2[Math.floor(Math.random() * PART2.length)];
   session.stage = 'part2';
   session.part2 = { topicId: topic.id, topic: topic.topic, cue: topic.cue, answer: null };
-  session.currentKey = `p2-${Date.now()}`;
-  session.answered = false;
 
   await bot.sendMessage(chatId,
     `🔸 *PART 2*\n\n${topic.cue}\n\n` +
-    `Javobingizni tayyorlab, *2 daqiqa* ichida gapirib bering yoki yozib yuboring.`,
+    `Javobingizni tayyorlab, matn yoki ovozli xabar orqali yuboring.`,
     { parse_mode: 'Markdown' }
   );
-
-  session.timeoutId = setTimeout(() => {
-    handlePart2Timeout(chatId, session.currentKey);
-  }, 120 * 1000);
-}
-
-async function handlePart2Timeout(chatId, key) {
-  const session = speakingSessions[chatId];
-  if (!session || session.currentKey !== key || session.answered) return;
-  session.answered = true;
-  session.part2.answer = '(vaqt tugadi, javob berilmadi)';
-  session.part2.viaVoice = false;
-  try { await bot.sendMessage(chatId, '⏰ Vaqt tugadi! Endi Part 3 savollariga o\'tamiz...'); } catch (e) {}
-  startPart3(chatId);
+  startInactivityTimer(chatId);
 }
 
 async function startPart3(chatId) {
@@ -881,7 +816,7 @@ async function startPart3(chatId) {
   session.part3 = { topic: group.topic, questions, index: 0, answers: [] };
 
   await bot.sendMessage(chatId,
-    `🔹 *PART 3* — Mavzu: _${group.topic}_\n\nHar bir savolga *40-45 soniya* ichida javob bering.`,
+    `🔹 *PART 3* — Mavzu: _${group.topic}_\n\nHar bir savolga matn yoki ovozli xabar orqali javob bering.`,
     { parse_mode: 'Markdown' }
   );
 
@@ -898,33 +833,54 @@ async function askPart3Question(chatId) {
   }
 
   const qText = questions[index];
-  const seconds = 40 + Math.floor(Math.random() * 6); // 40-45
-  const key = `p3-${index}-${Date.now()}`;
-  session.currentKey = key;
-  session.answered = false;
 
-  await bot.sendMessage(chatId, `🔹 Part 3 — Savol ${index + 1}/${questions.length}:\n\n${qText}\n\n⏱ ${seconds} soniya`);
-
-  session.timeoutId = setTimeout(() => {
-    handlePart3Timeout(chatId, key);
-  }, seconds * 1000);
+  await bot.sendMessage(chatId, `🔹 Part 3 — Savol ${index + 1}/${questions.length}:\n\n${qText}`);
+  startInactivityTimer(chatId);
 }
 
-async function handlePart3Timeout(chatId, key) {
+// Mockni erta tugatish (Tugatish tugmasi bosilganda) — javob berilmagan savollarni "skip" deb belgilaydi
+async function finishEarly(chatId) {
   const session = speakingSessions[chatId];
-  if (!session || session.currentKey !== key || session.answered) return;
-  session.answered = true;
-  session.part3.answers.push({ question: session.part3.questions[session.part3.index], answer: '(vaqt tugadi, javob berilmadi)', viaVoice: false });
-  session.part3.index++;
-  try { await bot.sendMessage(chatId, '⏰ Vaqt tugadi! Keyingi savolga o\'tamiz...'); } catch (e) {}
-  askPart3Question(chatId);
+  if (!session) return;
+  clearSessionTimer(session);
+
+  if (session.stage === 'part1') {
+    while (session.part1.index < session.part1.questions.length) {
+      session.part1.answers.push({
+        question: session.part1.questions[session.part1.index],
+        answer: '(javob berilmadi — mock erta tugatildi)',
+        viaVoice: false,
+      });
+      session.part1.index++;
+    }
+    session.part2 = { topicId: null, topic: '-', cue: '(o\'tkazib yuborildi)', answer: '(javob berilmadi — mock erta tugatildi)', viaVoice: false };
+    session.part3 = { topic: '-', questions: [], index: 0, answers: [] };
+  } else if (session.stage === 'part2') {
+    if (!session.part2.answer) {
+      session.part2.answer = '(javob berilmadi — mock erta tugatildi)';
+      session.part2.viaVoice = false;
+    }
+    session.part3 = { topic: '-', questions: [], index: 0, answers: [] };
+  } else if (session.stage === 'part3') {
+    while (session.part3.index < session.part3.questions.length) {
+      session.part3.answers.push({
+        question: session.part3.questions[session.part3.index],
+        answer: '(javob berilmadi — mock erta tugatildi)',
+        viaVoice: false,
+      });
+      session.part3.index++;
+    }
+  }
+
+  await bot.sendMessage(chatId, '⏹ Mock shu yerda tugatildi. Natijangiz javob berilgan qismlar asosida hisoblanadi.');
+  await finishSpeakingMock(chatId);
 }
 
 // Foydalanuvchidan kelgan javobni (matn yoki ovoz) qabul qilish
 async function handleSpeakingAnswer(msg) {
   const chatId = msg.chat.id;
   const session = speakingSessions[chatId];
-  if (!session || session.answered) return false;
+  if (!session) return false;
 
   let answerText = msg.text || msg.caption || null;
   let viaVoice = false;
@@ -941,7 +897,6 @@ async function handleSpeakingAnswer(msg) {
   if (!answerText) return false; // bu xabar javob emas (masalan, rasm)
 
   clearSessionTimer(session);
-  session.answered = true;
 
   if (session.stage === 'part1') {
     session.part1.answers.push({ question: session.part1.questions[session.part1.index], answer: answerText, viaVoice, voiceFileId });
@@ -965,10 +920,12 @@ async function finishSpeakingMock(chatId) {
   const session = speakingSessions[chatId];
   if (!session) return;
 
+  clearSessionTimer(session);
+
   const tierInfo = SPEAKING_TIERS[session.tier];
   const code = generateResultCode();
 
-  const meRef = await bot.sendMessage(chatId,
+  await bot.sendMessage(chatId,
     `✅ *Mock yakunlandi!*\n\n` +
     `Tarifingiz: ${tierInfo.label}\n` +
     `Natijangiz odatda *60 daqiqa* ichida shu chatga keladi.\n` +
@@ -989,7 +946,7 @@ async function finishSpeakingMock(chatId) {
     createdAt: Date.now(),
   };
 
-  // Adminga to'liq transkriptni yuborish
+  // Adminga to'liq transkriptni yuborish (ovozli javoblar ham matn ko'rinishida)
   const header =
     `🗣️ Yangi Speaking Mock — ${tierInfo.label}\n\n` +
     `🔑 Kod: ${code}\n\n` +
@@ -1042,7 +999,6 @@ bot.on('message', async (msg) => {
   if (String(chatId) === String(ADMIN_CHAT_ID)) return;
   if (msg.text && msg.text.startsWith('/start')) return;
   if (msg.text && msg.text.startsWith('/natija')) return;
-  if (msg.text && msg.text.startsWith('/login')) return;
   if (msg.document) return; // hujjatlar yuqorida alohida ishlanadi
 
   trackUser(userId);
@@ -1234,14 +1190,6 @@ bot.on('callback_query', async (query) => {
   const chatId = query.message.chat.id;
   const userId = query.from.id;
 
-  // 0. Saytga kirish kodi
-  if (query.data === 'get_login_code') {
-    await bot.answerCallbackQuery(query.id);
-    const fullName = [query.from.first_name, query.from.last_name].filter(Boolean).join(' ');
-    await issueLoginCode(chatId, userId, fullName);
-    return;
-  }
-
   // 1. So'rov yubordim tugmasi
   if (query.data === 'check_sub') {
     const subscribed = await isSubscribed(userId);
@@ -1430,6 +1378,26 @@ To'lovdan keyin chekni va emailingizni yuboring.`,
     }
     delete speakingApprovedTier[chatId];
     await startSpeakingMock(chatId, tierKey);
+    return;
+  }
+
+  // 12. Inaktivlik: "Davom etish" tugmasi — kutishni qayta boshlaydi
+  if (query.data === 'speaking_continue') {
+    await bot.answerCallbackQuery(query.id, { text: 'Davom etyapmiz ▶️' });
+    if (!speakingSessions[chatId]) {
+      return bot.sendMessage(chatId, 'Faol mock topilmadi.');
+    }
+    startInactivityTimer(chatId);
+    return;
+  }
+
+  // 13. Inaktivlik: "Tugatish" tugmasi — mockni erta yakunlaydi
+  if (query.data === 'speaking_finish') {
+    await bot.answerCallbackQuery(query.id, { text: 'Mock tugatilmoqda...' });
+    if (!speakingSessions[chatId]) {
+      return bot.sendMessage(chatId, 'Faol mock topilmadi.');
+    }
+    await finishEarly(chatId);
     return;
   }
 
